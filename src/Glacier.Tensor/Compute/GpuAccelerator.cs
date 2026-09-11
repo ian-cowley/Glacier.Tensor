@@ -27,6 +27,14 @@ public static unsafe class GpuAccelerator
     private static IntPtr s_cuModule;
     private static IntPtr s_cuGemmFn;
 
+    // High-performance reusable device memory pool (eliminates OS driver allocator overhead)
+    private static IntPtr s_pooledDevA;
+    private static IntPtr s_pooledDevB;
+    private static IntPtr s_pooledDevC;
+    private static nuint s_pooledCapA;
+    private static nuint s_pooledCapB;
+    private static nuint s_pooledCapC;
+
     private static bool s_amdInitialized;
     private static bool s_amdAvailable;
 
@@ -47,154 +55,6 @@ public static unsafe class GpuAccelerator
     public static bool HasNvidiaGpu => CuDriver.IsAvailable();
     public static bool HasAmdGpu => HipDriver.IsAvailable();
     public static IGpuEngine? Engine => s_gpuEngine.Value;
-
-    #region PTX Assembly (Bare-Metal SASS Driver Compilation)
-
-    // Pre-assembled 16x16 shared-memory tiled FP32 GEMM kernel.
-    // Compiled at driver load time by nvcuda.dll via cuModuleLoadData directly into Ada Lovelace / Ampere SASS.
-    private const string GemmPtx = @"
-.version 8.0
-.target sm_89
-.address_size 64
-
-.visible .entry gemm_fp32(
-    .param .u64 d_a,
-    .param .u64 d_b,
-    .param .u64 d_c,
-    .param .u32 m,
-    .param .u32 n,
-    .param .u32 k
-)
-{
-    .shared .align 4 .f32 s_a[256];
-    .shared .align 4 .f32 s_b[256];
-
-    .reg .pred %p_row, %p_col, %p_a, %p_b, %p_tile, %p_k;
-    .reg .b32 %tx, %ty, %bx, %by, %row, %col, %M, %N, %K;
-    .reg .b32 %t, %numTiles, %tiled_k, %k_step, %smem_idx, %r_off;
-    .reg .b32 %r_baseA, %r_baseB, %r_ptrA, %r_ptrB;
-    .reg .b64 %rd_a, %rd_b, %rd_c, %rd_ptr, %rd_off;
-    .reg .f32 %sum, %valA, %valB;
-
-    ld.param.u64 %rd_a, [d_a];
-    ld.param.u64 %rd_b, [d_b];
-    ld.param.u64 %rd_c, [d_c];
-    ld.param.u32 %M, [m];
-    ld.param.u32 %N, [n];
-    ld.param.u32 %K, [k];
-
-    mov.u32 %r_baseA, s_a;
-    mov.u32 %r_baseB, s_b;
-
-    mov.u32 %tx, %tid.x;
-    mov.u32 %ty, %tid.y;
-    mov.u32 %bx, %ctaid.x;
-    mov.u32 %by, %ctaid.y;
-
-    shl.b32 %row, %by, 4;
-    add.u32 %row, %row, %ty;
-
-    shl.b32 %col, %bx, 4;
-    add.u32 %col, %col, %tx;
-
-    mov.f32 %sum, 0.0;
-
-    add.u32 %numTiles, %K, 15;
-    shr.u32 %numTiles, %numTiles, 4;
-
-    mov.u32 %t, 0;
-
-TILE_LOOP:
-    setp.ge.u32 %p_tile, %t, %numTiles;
-    @%p_tile bra TILE_DONE;
-
-    shl.b32 %tiled_k, %t, 4;
-    add.u32 %tiled_k, %tiled_k, %tx;
-
-    shl.b32 %smem_idx, %ty, 4;
-    add.u32 %smem_idx, %smem_idx, %tx;
-    shl.b32 %r_off, %smem_idx, 2;
-    add.u32 %r_ptrA, %r_baseA, %r_off;
-
-    setp.lt.u32 %p_row, %row, %M;
-    setp.lt.u32 %p_a, %tiled_k, %K;
-    and.pred %p_a, %p_row, %p_a;
-
-    mov.f32 %valA, 0.0;
-    @!%p_a bra SKIP_LOAD_A;
-    mad.lo.u32 %r_off, %row, %K, %tiled_k;
-    cvt.u64.u32 %rd_off, %r_off;
-    shl.b64 %rd_off, %rd_off, 2;
-    add.s64 %rd_ptr, %rd_a, %rd_off;
-    ld.global.f32 %valA, [%rd_ptr];
-SKIP_LOAD_A:
-    st.shared.f32 [%r_ptrA], %valA;
-
-    shl.b32 %tiled_k, %t, 4;
-    add.u32 %tiled_k, %tiled_k, %ty;
-
-    shl.b32 %r_off, %smem_idx, 2;
-    add.u32 %r_ptrB, %r_baseB, %r_off;
-
-    setp.lt.u32 %p_b, %tiled_k, %K;
-    setp.lt.u32 %p_col, %col, %N;
-    and.pred %p_b, %p_b, %p_col;
-
-    mov.f32 %valB, 0.0;
-    @!%p_b bra SKIP_LOAD_B;
-    mad.lo.u32 %r_off, %tiled_k, %N, %col;
-    cvt.u64.u32 %rd_off, %r_off;
-    shl.b64 %rd_off, %rd_off, 2;
-    add.s64 %rd_ptr, %rd_b, %rd_off;
-    ld.global.f32 %valB, [%rd_ptr];
-SKIP_LOAD_B:
-    st.shared.f32 [%r_ptrB], %valB;
-
-    bar.sync 0;
-
-    mov.u32 %k_step, 0;
-INNER_K_LOOP:
-    shl.b32 %smem_idx, %ty, 4;
-    add.u32 %smem_idx, %smem_idx, %k_step;
-    shl.b32 %r_off, %smem_idx, 2;
-    add.u32 %r_ptrA, %r_baseA, %r_off;
-    ld.shared.f32 %valA, [%r_ptrA];
-
-    shl.b32 %smem_idx, %k_step, 4;
-    add.u32 %smem_idx, %smem_idx, %tx;
-    shl.b32 %r_off, %smem_idx, 2;
-    add.u32 %r_ptrB, %r_baseB, %r_off;
-    ld.shared.f32 %valB, [%r_ptrB];
-
-    fma.rn.f32 %sum, %valA, %valB, %sum;
-
-    add.u32 %k_step, %k_step, 1;
-    setp.lt.u32 %p_k, %k_step, 16;
-    @%p_k bra INNER_K_LOOP;
-
-    bar.sync 0;
-
-    add.u32 %t, %t, 1;
-    bra TILE_LOOP;
-
-TILE_DONE:
-    setp.lt.u32 %p_row, %row, %M;
-    setp.lt.u32 %p_col, %col, %N;
-    and.pred %p_row, %p_row, %p_col;
-    @!%p_row bra FINISH;
-
-    mad.lo.u32 %r_off, %row, %N, %col;
-    cvt.u64.u32 %rd_off, %r_off;
-    shl.b64 %rd_off, %rd_off, 2;
-    add.s64 %rd_ptr, %rd_c, %rd_off;
-    st.global.f32 [%rd_ptr], %sum;
-
-FINISH:
-    ret;
-}
-";
-
-    #endregion
 
     #region Driver Initialization
 
@@ -248,27 +108,18 @@ FINISH:
                     CuDriver.CtxSetCurrent(s_cuContext);
                 }
 
-                // Adjust PTX architecture target if needed
-                string ptx = GemmPtx;
-                if (!string.IsNullOrWhiteSpace(arch) && arch.StartsWith("sm_"))
-                {
-                    ptx = System.Text.RegularExpressions.Regex.Replace(ptx, @"\.target\s+sm_\d+", $".target {arch}");
-                }
-
-                byte[] cubin = KernelCache.GetOrCompile(arch, "GemmFp32", ptx);
+                byte[] cubin = KernelCache.GetOrCompile(arch, "FastGemmFp32", FastGemmKernel.PtxSource);
                 int modRes = CuDriver.ModuleLoadData(out s_cuModule, cubin);
                 if (modRes != 0)
                 {
-                    Console.WriteLine($"[Glacier.Tensor GpuAccelerator] CuDriver.ModuleLoadData failed with error code: {modRes}");
                     s_nvidiaAvailable = false;
                     s_nvidiaInitialized = true;
                     return false;
                 }
 
-                int fnRes = CuDriver.ModuleGetFunction(out s_cuGemmFn, s_cuModule, "gemm_fp32");
+                int fnRes = CuDriver.ModuleGetFunction(out s_cuGemmFn, s_cuModule, "fast_gemm_fp32");
                 if (fnRes != 0)
                 {
-                    Console.WriteLine($"[Glacier.Tensor GpuAccelerator] CuDriver.ModuleGetFunction failed with error code: {fnRes}");
                     s_nvidiaAvailable = false;
                     s_nvidiaInitialized = true;
                     return false;
@@ -276,9 +127,8 @@ FINISH:
 
                 s_nvidiaAvailable = true;
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine($"[Glacier.Tensor GpuAccelerator] EnsureNvidiaInitialized exception: {ex}");
                 s_nvidiaAvailable = false;
             }
             finally
@@ -437,9 +287,31 @@ FINISH:
 
         try
         {
-            if (CuDriver.MemAlloc(out d_a, bytesA) != 0) return false;
-            if (CuDriver.MemAlloc(out d_b, bytesB) != 0) return false;
-            if (CuDriver.MemAlloc(out d_c, bytesC) != 0) return false;
+            lock (s_initLock)
+            {
+                if (bytesA > s_pooledCapA)
+                {
+                    if (s_pooledDevA != IntPtr.Zero) CuDriver.MemFree(s_pooledDevA);
+                    if (CuDriver.MemAlloc(out s_pooledDevA, bytesA) != 0) return false;
+                    s_pooledCapA = bytesA;
+                }
+                if (bytesB > s_pooledCapB)
+                {
+                    if (s_pooledDevB != IntPtr.Zero) CuDriver.MemFree(s_pooledDevB);
+                    if (CuDriver.MemAlloc(out s_pooledDevB, bytesB) != 0) return false;
+                    s_pooledCapB = bytesB;
+                }
+                if (bytesC > s_pooledCapC)
+                {
+                    if (s_pooledDevC != IntPtr.Zero) CuDriver.MemFree(s_pooledDevC);
+                    if (CuDriver.MemAlloc(out s_pooledDevC, bytesC) != 0) return false;
+                    s_pooledCapC = bytesC;
+                }
+
+                d_a = s_pooledDevA;
+                d_b = s_pooledDevB;
+                d_c = s_pooledDevC;
+            }
 
             fixed (float* pA = a.AsSpan(), pB = b.AsSpan(), pC = c.AsSpan())
             {
@@ -463,8 +335,9 @@ FINISH:
 
                 hArray = GCHandle.Alloc(kernelParams, GCHandleType.Pinned);
 
-                uint gridX = (uint)((N + 15) / 16);
-                uint gridY = (uint)((M + 15) / 16);
+                // Fast GEMM computes a 64x64 block per CTA using 256 threads (16x16)
+                uint gridX = (uint)((N + 63) / 64);
+                uint gridY = (uint)((M + 63) / 64);
 
                 int launchRes = CuDriver.LaunchKernel(
                     s_cuGemmFn,
@@ -495,10 +368,6 @@ FINISH:
             if (h4.IsAllocated) h4.Free();
             if (h5.IsAllocated) h5.Free();
             if (hArray.IsAllocated) hArray.Free();
-
-            if (d_a != IntPtr.Zero) CuDriver.MemFree(d_a);
-            if (d_b != IntPtr.Zero) CuDriver.MemFree(d_b);
-            if (d_c != IntPtr.Zero) CuDriver.MemFree(d_c);
         }
     }
 
