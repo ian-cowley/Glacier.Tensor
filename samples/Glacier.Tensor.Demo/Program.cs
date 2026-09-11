@@ -8,6 +8,7 @@ using Glacier.Tensor.Core;
 using Glacier.Tensor.Interop;
 using Glacier.Tensor.Layers;
 using Glacier.Tensor.Losses;
+using System.Linq;
 using Glacier.Tensor.Optimizers;
 
 Console.ForegroundColor = ConsoleColor.Cyan;
@@ -201,3 +202,9 @@ Console.ForegroundColor = ConsoleColor.Green;
 Console.WriteLine("All Glacier.Tensor deep learning & autograd experiments completed successfully!");
 Console.ResetColor();
 Console.WriteLine("================================================================================");
+
+if (!args.Contains("--headless") && !args.Contains("--bench") && Environment.UserInteractive && !Console.IsInputRedirected)
+{
+    Console.WriteLine("\n[Press any key to exit...]");
+    Console.ReadKey();
+}
