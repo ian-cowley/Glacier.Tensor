@@ -9,7 +9,7 @@ namespace Glacier.Tensor.Core;
 /// </summary>
 public static class TensorOps
 {
-    public static Tensor<float> MatMul(Tensor<float> a, Tensor<float> b)
+    public static Tensor<float> MatMul(Tensor<float> a, Tensor<float> b, GpuTarget target = GpuTarget.Auto)
     {
         if (a.Rank != 2 || b.Rank != 2)
             throw new ArgumentException("MatMul expects 2D tensors.");
@@ -17,7 +17,7 @@ public static class TensorOps
         int M = a.Shape[0];
         int N = b.Shape[1];
         var c = new Tensor<float>(M, N);
-        GemmKernels.MatMul(a, b, c);
+        GpuAccelerator.AcceleratedMatMul(a, b, c, target);
 
         c.RequiresGrad = a.RequiresGrad || b.RequiresGrad;
         AutogradTape.Current?.Record(new TapeEntry(AutogradOp.MatMul, c, a, b));

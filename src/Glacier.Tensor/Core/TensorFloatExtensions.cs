@@ -1,4 +1,5 @@
 using System;
+using Glacier.Tensor.Compute;
 
 namespace Glacier.Tensor.Core;
 
@@ -54,5 +55,21 @@ public static class TensorFloatExtensions
     {
         float bound = (float)Math.Sqrt(3.0 / Math.Max(1, fanIn));
         return RandomUniform(shape, -bound, bound, seed);
+    }
+
+    /// <summary>
+    /// Executes matrix multiplication C = A * B using specified hardware target (Auto, Nvidia, Amd, DualGpu, or Cpu).
+    /// </summary>
+    public static void MatMul(this Tensor<float> a, Tensor<float> b, Tensor<float> c, GpuTarget target = GpuTarget.Auto)
+    {
+        GpuAccelerator.AcceleratedMatMul(a, b, c, target);
+    }
+
+    /// <summary>
+    /// Executes matrix multiplication C = A * B using specified hardware target (Auto, Nvidia, Amd, DualGpu, or Cpu), allocating a new result tensor.
+    /// </summary>
+    public static Tensor<float> MatMul(this Tensor<float> a, Tensor<float> b, GpuTarget target = GpuTarget.Auto)
+    {
+        return TensorOps.MatMul(a, b, target);
     }
 }

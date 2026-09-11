@@ -180,21 +180,75 @@ using (var tensorFromDf = df.ToTensor("feature_a", "feature_b"))
 // -----------------------------------------------------------------------------
 Console.WriteLine("\n--------------------------------------------------------------------------------");
 Console.ForegroundColor = ConsoleColor.Yellow;
-Console.WriteLine("EXPERIMENT 5: Hardware GPU Acceleration Bridge via Glacier.Gpu");
+Console.WriteLine("EXPERIMENT 5: Hardware GPU Acceleration (Nvidia, Amd, Auto, Cpu Targets)");
 Console.ResetColor();
 Console.WriteLine("--------------------------------------------------------------------------------");
 
+Console.WriteLine($"  GPU Hardware Detected: NVIDIA={GpuAccelerator.HasNvidiaGpu}, AMD={GpuAccelerator.HasAmdGpu}");
 if (GpuAccelerator.IsGpuAvailable && GpuAccelerator.Engine != null)
 {
     var dev = GpuAccelerator.Engine.DeviceInfo;
-    Console.ForegroundColor = ConsoleColor.Green;
-    Console.WriteLine($"  [Glacier.Gpu] Hardware Engine Available: {dev.DeviceName}");
+    Console.ForegroundColor = ConsoleColor.Cyan;
+    Console.WriteLine($"  [Glacier.Gpu Engine] {dev.DeviceName}");
     Console.WriteLine($"  Architecture: {dev.Architecture} | Compute Units: {dev.ComputeUnitsOrSms}");
     Console.ResetColor();
 }
-else
+
+int[] benchSizes = { 512, 1024 };
+
+foreach (int benchSize in benchSizes)
 {
-    Console.WriteLine("  Bare-metal GPU acceleration bridge initialized (CPU AVX-512 active).");
+    Console.WriteLine($"\n  Benchmarking {benchSize}x{benchSize} FP32 GEMM across hardware targets ({(benchSize >= 1024 ? 5 : 20)} iterations)...");
+
+    using var aBench = TensorFloatExtensions.RandomUniform([benchSize, benchSize], -1f, 1f, seed: 42);
+    using var bBench = TensorFloatExtensions.RandomUniform([benchSize, benchSize], -1f, 1f, seed: 84);
+    using var cBench = new Tensor<float>(benchSize, benchSize);
+
+    var targetsToTest = new[]
+    {
+        (Target: GpuTarget.Cpu, Name: "CPU AVX-512 (Dynamic Core Scaling)"),
+        (Target: GpuTarget.Auto, Name: "Auto (Adaptive Hardware Dispatch)"),
+        (Target: GpuTarget.Amd, Name: "AMD Radeon 890M (Zero-Copy Unified RAM)"),
+        (Target: GpuTarget.Nvidia, Name: "NVIDIA GeForce RTX 4060 (Bare-Metal SASS)")
+    };
+
+    foreach (var (target, name) in targetsToTest)
+    {
+        try
+        {
+            // Warmup
+            aBench.MatMul(bBench, cBench, target);
+
+            int iters = benchSize >= 1024 ? 5 : 20;
+            var swGpu = Stopwatch.StartNew();
+            for (int i = 0; i < iters; i++)
+            {
+                aBench.MatMul(bBench, cBench, target);
+            }
+            swGpu.Stop();
+
+            double avgMs = swGpu.Elapsed.TotalMilliseconds / iters;
+            double gflops = (2.0 * benchSize * benchSize * benchSize / (avgMs * 1e6));
+
+            Console.ForegroundColor = target switch
+            {
+                GpuTarget.Nvidia => ConsoleColor.Green,
+                GpuTarget.Amd => ConsoleColor.Red,
+                GpuTarget.Auto => ConsoleColor.Cyan,
+                _ => ConsoleColor.White
+            };
+
+            Console.WriteLine($"    [{name}]");
+            Console.WriteLine($"      Latency: {avgMs:F2} ms | Throughput: {gflops:F2} GFLOPS ({(gflops / 1000.0):F2} TFLOPS)");
+            Console.ResetColor();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"    [{name}] Skipped: {ex.Message}");
+            Console.ResetColor();
+        }
+    }
 }
 
 Console.WriteLine("\n================================================================================");
