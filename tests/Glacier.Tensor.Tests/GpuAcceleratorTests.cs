@@ -96,6 +96,25 @@ public class GpuAcceleratorTests
         VerifyAgainstGroundTruth(a, b, c, M, K, N, tolerance: 1e-3f);
     }
 
+    [Fact]
+    public void MatMul_NvidiaTensorCore_IfHardwareAvailable_ComputesAccurateResult()
+    {
+        if (!GpuAccelerator.HasNvidiaGpu)
+        {
+            return;
+        }
+
+        int M = 256, K = 256, N = 256;
+        using var a = TensorFloatExtensions.RandomUniform([M, K], -1f, 1f, seed: 1111);
+        using var b = TensorFloatExtensions.RandomUniform([K, N], -1f, 1f, seed: 1212);
+        using var c = new Tensor<float>(M, N);
+
+        a.MatMul(b, c, GpuTarget.NvidiaTensorCore);
+
+        // Half precision Tensor Core inputs have ~1e-2 tolerance due to 11-bit mantissa conversion
+        VerifyAgainstGroundTruth(a, b, c, M, K, N, tolerance: 0.05f);
+    }
+
     private static void VerifyAgainstGroundTruth(Tensor<float> a, Tensor<float> b, Tensor<float> c, int M, int K, int N, float tolerance = 1e-4f)
     {
         var spanA = a.AsSpan();

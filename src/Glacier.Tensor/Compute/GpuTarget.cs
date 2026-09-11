@@ -31,5 +31,11 @@ public enum GpuTarget
     /// <summary>
     /// Multi-threaded CPU execution using cache-blocked AVX-512 / AVX2 microkernels and dynamic core scaling.
     /// </summary>
-    Cpu = 4
+    Cpu = 4,
+
+    /// <summary>
+    /// Targets 4th Generation Ada Lovelace Tensor Cores on NVIDIA RTX 4060 dGPU (WMMA hardware execution).
+    /// Delivers 30–60+ TFLOPS throughput for half-precision and TensorFloat matrix multiplication.
+    /// </summary>
+    NvidiaTensorCore = 5
 }

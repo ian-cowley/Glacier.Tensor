@@ -209,7 +209,8 @@ foreach (int benchSize in benchSizes)
         (Target: GpuTarget.Cpu, Name: "CPU AVX-512 (Dynamic Core Scaling)"),
         (Target: GpuTarget.Auto, Name: "Auto (Adaptive Hardware Dispatch)"),
         (Target: GpuTarget.Amd, Name: "AMD Radeon 890M (Zero-Copy Unified RAM)"),
-        (Target: GpuTarget.Nvidia, Name: "NVIDIA GeForce RTX 4060 (Bare-Metal SASS)")
+        (Target: GpuTarget.Nvidia, Name: "NVIDIA GeForce RTX 4060 (Bare-Metal SASS)"),
+        (Target: GpuTarget.NvidiaTensorCore, Name: "NVIDIA RTX 4060 Ada Tensor Cores (4th-Gen WMMA)")
     };
 
     foreach (var (target, name) in targetsToTest)
@@ -232,6 +233,7 @@ foreach (int benchSize in benchSizes)
 
             Console.ForegroundColor = target switch
             {
+                GpuTarget.NvidiaTensorCore => ConsoleColor.Magenta,
                 GpuTarget.Nvidia => ConsoleColor.Green,
                 GpuTarget.Amd => ConsoleColor.Red,
                 GpuTarget.Auto => ConsoleColor.Cyan,
