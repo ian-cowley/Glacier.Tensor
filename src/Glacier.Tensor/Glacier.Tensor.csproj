@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>preview</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TieredPGO>true</TieredPGO>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <NoWarn>$(NoWarn);CS1591;CS8981</NoWarn>
+
+    <!-- NuGet Package Properties -->
+    <PackageId>Glacier.Tensor</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Ian Cowley</Authors>
+    <Company>Glacier High-Performance Ecosystem</Company>
+    <Description>Pure C# N-dimensional strided tensor engine and zero-allocation autograd framework for .NET 10. Native alternative to TensorFlow and PyTorch with cache-blocked AVX-512 GEMM, Polaris DataFrame zero-copy ingestion, and bare-metal Glacier.Gpu acceleration.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/ian-cowley/Glacier.Tensor</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ian-cowley/Glacier.Tensor.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>tensor;autograd;deep-learning;pytorch;tensorflow;gemm;simd;avx512;gpu;high-performance;net10;glacier</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Glacier.Polaris" Version="1.0.14" />
+    <PackageReference Include="Glacier.Gpu" Version="1.0.0" />
+  </ItemGroup>
+</Project>

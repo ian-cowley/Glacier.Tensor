@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Glacier.Tensor/Glacier.Tensor.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Glacier.Tensor.Tests/Glacier.Tensor.Tests.csproj" />
+  </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/Glacier.Tensor.Benchmarks/Glacier.Tensor.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Glacier.Tensor.Demo/Glacier.Tensor.Demo.csproj" />
+  </Folder>
+</Solution>
