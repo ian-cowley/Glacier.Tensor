@@ -204,13 +204,21 @@ foreach (int benchSize in benchSizes)
     using var bBench = TensorFloatExtensions.RandomUniform([benchSize, benchSize], -1f, 1f, seed: 84);
     using var cBench = new Tensor<float>(benchSize, benchSize);
 
+    string nvName = GpuAccelerator.Engine?.DeviceInfo.DeviceName ?? "NVIDIA GPU";
+    string nvArch = GpuAccelerator.Engine?.DeviceInfo.Architecture ?? "SASS";
+    string amdName = "AMD Radeon / Ryzen APU (Zero-Copy Unified RAM)";
+    if (GpuAccelerator.HasAmdGpu)
+    {
+        try { amdName = $"{Glacier.Gpu.Drivers.HipDriver.GetDeviceName(0)} (Zero-Copy Unified RAM)"; } catch { }
+    }
+
     var targetsToTest = new[]
     {
         (Target: GpuTarget.Cpu, Name: "CPU AVX-512 (Dynamic Core Scaling)"),
         (Target: GpuTarget.Auto, Name: "Auto (Adaptive Hardware Dispatch)"),
-        (Target: GpuTarget.Amd, Name: "AMD Radeon 890M (Zero-Copy Unified RAM)"),
-        (Target: GpuTarget.Nvidia, Name: "NVIDIA GeForce RTX 4060 (Bare-Metal SASS)"),
-        (Target: GpuTarget.NvidiaTensorCore, Name: "NVIDIA RTX 4060 Ada Tensor Cores (4th-Gen WMMA)")
+        (Target: GpuTarget.Amd, Name: amdName),
+        (Target: GpuTarget.Nvidia, Name: $"{nvName} (Bare-Metal {nvArch})"),
+        (Target: GpuTarget.NvidiaTensorCore, Name: $"{nvName} (Tensor Cores WMMA)")
     };
 
     foreach (var (target, name) in targetsToTest)
