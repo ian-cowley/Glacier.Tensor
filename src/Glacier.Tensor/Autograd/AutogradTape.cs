@@ -38,7 +38,7 @@ public sealed class AutogradTape : IDisposable
         _entries.Add(entry);
     }
 
-    public void Backward(Tensor<float> output)
+    public void Backward(Tensor<float> output, bool retainGraph = false)
     {
         // Seed output gradient with 1.0f if not already seeded
         if (output.Grad == null)
@@ -148,7 +148,7 @@ public sealed class AutogradTape : IDisposable
                     if (entry.Input0?.RequiresGrad == true)
                     {
                         // dx = dy * y * (1 - y)
-                        using var y = entry.Output;
+                        var y = entry.Output;
                         using var oneMinusY = new Tensor<float>(y.Shape);
                         oneMinusY.Fill(1.0f);
                         ElementwiseKernels.Subtract(oneMinusY, y, oneMinusY);
@@ -162,7 +162,70 @@ public sealed class AutogradTape : IDisposable
                     }
                     break;
                 }
+
+                case AutogradOp.GELU:
+                {
+                    if (entry.Input0?.RequiresGrad == true)
+                    {
+                        using var dx = new Tensor<float>(entry.Input0.Shape);
+                        ElementwiseKernels.GELUBackward(dY, entry.Input0, dx);
+                        AccumulateGradient(entry.Input0, dx);
+                    }
+                    break;
+                }
+
+                case AutogradOp.RMSNorm:
+                {
+                    var a = entry.Input0;
+                    var w = entry.Input1;
+                    float eps = entry.Scalar > 0 ? entry.Scalar : 1e-5f;
+
+                    Tensor<float>? da = a?.RequiresGrad == true ? new Tensor<float>(a.Shape) : null;
+                    Tensor<float>? dw = w?.RequiresGrad == true ? new Tensor<float>(w.Shape) : null;
+
+                    if (da != null || dw != null)
+                    {
+                        using var scopedDa = da;
+                        using var scopedDw = dw;
+                        using var dummyDa = da == null ? new Tensor<float>(a!.Shape) : null;
+
+                        ElementwiseKernels.RMSNormBackward(dY, a!, w, da ?? dummyDa!, dw, eps);
+
+                        if (da != null)
+                        {
+                            AccumulateGradient(a!, da);
+                        }
+                        if (dw != null)
+                        {
+                            AccumulateGradient(w!, dw);
+                        }
+                    }
+                    break;
+                }
+
+                case AutogradOp.CrossEntropyLoss:
+                {
+                    var logits = entry.Input0;
+                    var targets = entry.Input1;
+                    if (logits?.RequiresGrad == true && targets != null)
+                    {
+                        float dLoss = dY.AsSpan()[0];
+                        using var dLogits = new Tensor<float>(logits.Shape);
+                        Losses.LossFunctions.ComputeCrossEntropyGradient(logits, targets, dLogits, dLoss);
+                        if (logits.Grad != null)
+                        {
+                            logits.Grad.Fill(0.0f);
+                        }
+                        AccumulateGradient(logits, dLogits);
+                    }
+                    break;
+                }
             }
+        }
+
+        if (!retainGraph)
+        {
+            _entries.Clear();
         }
     }
 

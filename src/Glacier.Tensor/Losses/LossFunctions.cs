@@ -84,4 +84,131 @@ public static class LossFunctions
 
         return (totalLoss, lossTensor);
     }
+
+    /// <summary>
+    /// Computes multi-class categorical cross-entropy loss with fused numerical-stable softmax.
+    /// Supports one-hot targets of shape [B, C] or class index targets of shape [B] or [B, 1].
+    /// Automatically records on AutogradTape for reverse-mode automatic differentiation.
+    /// </summary>
+    public static (float lossValue, Tensor<float> lossTensor) CrossEntropy(Tensor<float> logits, Tensor<float> targets)
+    {
+        int batch = logits.Shape.Rank > 1 ? logits.Shape[0] : 1;
+        int classes = logits.Shape.Rank > 1 ? logits.Shape[1] : logits.Shape[0];
+
+        if (batch <= 0 || classes <= 0)
+            throw new ArgumentException("Invalid logits tensor dimensions.");
+
+        var logSpan = logits.AsSpan();
+        var tgtSpan = targets.AsSpan();
+        bool isOneHot = targets.ElementCount == (long)batch * classes;
+
+        float totalLoss = 0f;
+        const float eps = 1e-12f;
+
+        for (int b = 0; b < batch; b++)
+        {
+            int offset = b * classes;
+
+            // 1. Find max logit for numerical stability
+            float maxLogit = logSpan[offset];
+            for (int c = 1; c < classes; c++)
+            {
+                if (logSpan[offset + c] > maxLogit)
+                    maxLogit = logSpan[offset + c];
+            }
+
+            // 2. Sum exp(z - max)
+            float sumExp = 0f;
+            for (int c = 0; c < classes; c++)
+            {
+                sumExp += MathF.Exp(logSpan[offset + c] - maxLogit);
+            }
+
+            // 3. Compute loss
+            if (isOneHot)
+            {
+                for (int c = 0; c < classes; c++)
+                {
+                    float y = tgtSpan[offset + c];
+                    if (y > 0f)
+                    {
+                        float p = MathF.Exp(logSpan[offset + c] - maxLogit) / sumExp;
+                        totalLoss -= y * MathF.Log(MathF.Max(p, eps));
+                    }
+                }
+            }
+            else
+            {
+                int targetClass = (int)tgtSpan[b];
+                if (targetClass >= 0 && targetClass < classes)
+                {
+                    float p = MathF.Exp(logSpan[offset + targetClass] - maxLogit) / sumExp;
+                    totalLoss -= MathF.Log(MathF.Max(p, eps));
+                }
+            }
+        }
+
+        totalLoss /= batch;
+
+        var lossTensor = new Tensor<float>(1);
+        lossTensor.AsSpan()[0] = totalLoss;
+
+        if (AutogradTape.Current != null)
+        {
+            if (logits.Grad == null)
+                logits.Grad = Tensor<float>.Zeros(logits.Shape);
+
+            ComputeCrossEntropyGradient(logits, targets, logits.Grad, 1.0f);
+
+            AutogradTape.Current.Record(new TapeEntry(AutogradOp.CrossEntropyLoss, lossTensor, logits, targets));
+        }
+
+        return (totalLoss, lossTensor);
+    }
+
+    internal static void ComputeCrossEntropyGradient(
+        Tensor<float> logits,
+        Tensor<float> targets,
+        Tensor<float> gradOutput,
+        float dLoss)
+    {
+        int batch = logits.Shape.Rank > 1 ? logits.Shape[0] : 1;
+        int classes = logits.Shape.Rank > 1 ? logits.Shape[1] : logits.Shape[0];
+
+        var logSpan = logits.AsSpan();
+        var tgtSpan = targets.AsSpan();
+        var outSpan = gradOutput.AsSpan();
+        bool isOneHot = targets.ElementCount == (long)batch * classes;
+        float scale = dLoss / batch;
+
+        for (int b = 0; b < batch; b++)
+        {
+            int offset = b * classes;
+
+            // 1. Max logit
+            float maxLogit = logSpan[offset];
+            for (int c = 1; c < classes; c++)
+            {
+                if (logSpan[offset + c] > maxLogit)
+                    maxLogit = logSpan[offset + c];
+            }
+
+            // 2. Sum exp
+            float sumExp = 0f;
+            for (int c = 0; c < classes; c++)
+            {
+                sumExp += MathF.Exp(logSpan[offset + c] - maxLogit);
+            }
+
+            // 3. Softmax & Gradient: dZ = scale * (p - y)
+            int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
+
+            for (int c = 0; c < classes; c++)
+            {
+                float p = MathF.Exp(logSpan[offset + c] - maxLogit) / sumExp;
+                float y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0f : 0.0f);
+                outSpan[offset + c] = scale * (p - y);
+            }
+        }
+    }
 }

@@ -11,7 +11,10 @@ public enum AutogradOp : int
     MatMul = 4,
     ReLU = 5,
     Sigmoid = 6,
-    Scale = 7
+    Scale = 7,
+    GELU = 8,
+    RMSNorm = 9,
+    CrossEntropyLoss = 10
 }
 
 /// <summary>

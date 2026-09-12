@@ -84,6 +84,26 @@ public static class TensorOps
         return c;
     }
 
+    public static Tensor<float> GELU(Tensor<float> a)
+    {
+        var c = new Tensor<float>(a.Shape);
+        ElementwiseKernels.GELU(a, c);
+
+        c.RequiresGrad = a.RequiresGrad;
+        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.GELU, c, a));
+        return c;
+    }
+
+    public static Tensor<float> RMSNorm(Tensor<float> a, Tensor<float>? weight = null, float eps = 1e-5f)
+    {
+        var c = new Tensor<float>(a.Shape);
+        ElementwiseKernels.RMSNorm(a, weight, c, eps);
+
+        c.RequiresGrad = a.RequiresGrad || (weight?.RequiresGrad == true);
+        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.RMSNorm, c, a, weight, eps));
+        return c;
+    }
+
     public static Tensor<float> Softmax(Tensor<float> a, int dim = -1)
     {
         var c = new Tensor<float>(a.Shape);

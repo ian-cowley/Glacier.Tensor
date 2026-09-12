@@ -117,6 +117,39 @@ GpuAccelerator.AcceleratedMatMul(a, b, c, GpuTarget.NvidiaTensorCore);
 GpuAccelerator.AcceleratedMatMul(a, b, c, GpuTarget.Auto);
 ```
 
+### 4.3 End-to-End Multi-Class Neural Network Training Loop
+```csharp
+using Glacier.Tensor.Autograd;
+using Glacier.Tensor.Layers;
+using Glacier.Tensor.Losses;
+using Glacier.Tensor.Optimizers;
+
+using var l1 = new Linear(inFeatures: 8, outFeatures: 16);
+using var l2 = new Linear(inFeatures: 16, outFeatures: 3);
+var parameters = new List<Tensor<float>> { l1.Weight, l1.Bias, l2.Weight, l2.Bias };
+using var optimizer = new AdamW(parameters, lr: 0.08f);
+
+for (int epoch = 0; epoch < 100; epoch++)
+{
+    optimizer.ZeroGrad();
+
+    using var tape = new AutogradTape();
+    foreach (var p in parameters) tape.Watch(p);
+
+    using var h1 = l1.Forward(x);
+    using var act1 = TensorOps.GELU(h1);
+    using var logits = l2.Forward(act1);
+
+    // Numerically-stable Log-Sum-Exp Cross Entropy Loss
+    var (lossVal, lossTensor) = LossFunctions.CrossEntropy(logits, targets);
+
+    // Reverse-mode tape backward pass propagates through all layers
+    tape.Backward(lossTensor);
+
+    optimizer.Step();
+}
+```
+
 ---
 
 ## 5. Ecosystem Cross-References
