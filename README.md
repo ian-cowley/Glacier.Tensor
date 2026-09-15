@@ -151,6 +151,32 @@ for (int epoch = 0; epoch < 100; epoch++)
 }
 ```
 
+### 4.4 Parameter-Efficient Fine-Tuning (PEFT / LoRA)
+```csharp
+using Glacier.Tensor.Autograd;
+using Glacier.Tensor.Layers;
+using Glacier.Tensor.Optimizers;
+
+// Wrap frozen base weights (e.g. from GGUF transformer layer) with low-rank adapters
+// Y = X * W0 + (alpha / r) * (X * A) * B
+using var baseWeights = Tensor<float>.Zeros(2048, 2048); // Frozen, 0 gradients
+using var lora = new LoraLinear(baseWeights, baseBias: null, rank: 16, alpha: 32f);
+
+// 98.4% parameter reduction: only A and B are registered on optimizer
+using var optimizer = new AdamW(lora.Parameters, lr: 0.01f);
+
+using var tape = new AutogradTape();
+foreach (var p in lora.Parameters) tape.Watch(p);
+
+var pred = lora.Forward(tokens);
+var (loss, _) = LossFunctions.MSELoss(pred, targets);
+tape.Backward(pred);
+optimizer.Step();
+
+// Zero-overhead inference merge: folds A and B directly into base weight W0
+using var mergedModel = lora.Merge();
+```
+
 ---
 
 ## 5. Ecosystem Cross-References

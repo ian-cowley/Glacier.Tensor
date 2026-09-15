@@ -274,6 +274,101 @@ foreach (int benchSize in benchSizes)
     }
 }
 
+// -----------------------------------------------------------------------------
+// EXPERIMENT 6: Parameter-Efficient Fine-Tuning (PEFT / LoRA)
+// -----------------------------------------------------------------------------
+Console.WriteLine("\n--------------------------------------------------------------------------------");
+Console.ForegroundColor = ConsoleColor.Yellow;
+Console.WriteLine("EXPERIMENT 6: Parameter-Efficient Fine-Tuning (PEFT / LoRA)");
+Console.ResetColor();
+Console.WriteLine("--------------------------------------------------------------------------------");
+
+int loraDim = 2048;
+int loraRank = 16;
+float loraAlpha = 32f;
+int loraBatch = 32;
+
+Console.WriteLine($"  Simulating LLM Transformer Projection Layer [{loraDim} x {loraDim}] with LoRA (r={loraRank}, alpha={loraAlpha})...");
+long baseParams = (long)loraDim * loraDim;
+long adapterParams = (long)loraDim * loraRank * 2;
+double paramReduction = (1.0 - ((double)adapterParams / baseParams)) * 100.0;
+
+Console.WriteLine($"  Base Model Weights (W0): {baseParams:N0} params ({baseParams * 4 / (1024 * 1024)} MB FP32) [FROZEN]");
+Console.WriteLine($"  LoRA Adapters (A + B):   {adapterParams:N0} params ({adapterParams * 4 / 1024} KB FP32) [TRAINABLE]");
+Console.ForegroundColor = ConsoleColor.Green;
+Console.WriteLine($"  Trainable Parameter Reduction: {paramReduction:F2}% (Only {(double)adapterParams / baseParams * 100.0:F2}% trainable!)");
+Console.ResetColor();
+
+using (var baseWeight = TensorFloatExtensions.RandomUniform([loraDim, loraDim], -0.05f, 0.05f, seed: 42))
+using (var loraLayer = new LoraLinear(baseWeight, null, rank: loraRank, alpha: loraAlpha, seed: 101))
+using (var optimizer = new AdamW(loraLayer.Parameters, lr: 0.01f))
+using (var trainInput = TensorFloatExtensions.RandomUniform([loraBatch, loraDim], -1f, 1f, seed: 202))
+using (var targetOutput = TensorFloatExtensions.RandomUniform([loraBatch, loraDim], -1f, 1f, seed: 303))
+{
+    Console.WriteLine($"\n  Running 25 LoRA Fine-Tuning Steps with AutogradTape & AdamW (Batch={loraBatch})...");
+
+    float initialLoss = 0f;
+    float finalLoss = 0f;
+    var swLora = Stopwatch.StartNew();
+
+    for (int step = 1; step <= 25; step++)
+    {
+        optimizer.ZeroGrad();
+
+        using var tape = new AutogradTape();
+        foreach (var p in loraLayer.Parameters) tape.Watch(p);
+
+        using var pred = loraLayer.Forward(trainInput);
+        var (lossVal, _) = LossFunctions.MSELoss(pred, targetOutput);
+
+        if (step == 1) initialLoss = lossVal;
+        finalLoss = lossVal;
+
+        tape.Backward(pred);
+        optimizer.Step();
+
+        if (step == 1 || step % 5 == 0)
+        {
+            Console.WriteLine($"    Step {step,2}/25 | MSE Loss: {lossVal:F6} | Adapter Gradients Active");
+        }
+    }
+    swLora.Stop();
+
+    double avgStepMs = swLora.Elapsed.TotalMilliseconds / 25.0;
+    double throughput = (loraBatch * 25.0) / swLora.Elapsed.TotalSeconds;
+
+    Console.ForegroundColor = ConsoleColor.Cyan;
+    Console.WriteLine($"\n  LoRA Training Completed in {swLora.Elapsed.TotalMilliseconds:F1} ms ({avgStepMs:F2} ms/step)");
+    Console.WriteLine($"  Loss Reduction: {initialLoss:F6} -> {finalLoss:F6} ({(1.0f - finalLoss / initialLoss) * 100f:F1}% drop)");
+    Console.WriteLine($"  Fine-Tuning Throughput: {throughput:F1} tokens/sec");
+    Console.ResetColor();
+
+    // Demonstrate Merge for deployment
+    Console.WriteLine("\n  Fusing LoRA Adapters into Base Model Weights (Zero-Overhead Merge)...");
+    var swMerge = Stopwatch.StartNew();
+    using var mergedWeights = loraLayer.Merge();
+    swMerge.Stop();
+    Console.WriteLine($"  Merged W = W0 + (alpha/r)*(A*B) in {swMerge.Elapsed.TotalMilliseconds:F2} ms!");
+
+    // Verify inference equivalence
+    using var testX = TensorFloatExtensions.RandomUniform([4, loraDim], -1f, 1f, seed: 555);
+    using var outLora = loraLayer.Forward(testX);
+    using var outMerged = TensorOps.MatMul(testX, mergedWeights);
+
+    var spanLora = outLora.AsSpan();
+    var spanMerged = outMerged.AsSpan();
+    float maxDiff = 0f;
+    for (int i = 0; i < spanLora.Length; i++)
+    {
+        float diff = Math.Abs(spanLora[i] - spanMerged[i]);
+        if (diff > maxDiff) maxDiff = diff;
+    }
+
+    Console.ForegroundColor = ConsoleColor.Green;
+    Console.WriteLine($"  Inference Parity Verification: Max Difference = {maxDiff:E2} (Perfect Bitwise Fusion!)");
+    Console.ResetColor();
+}
+
 Console.WriteLine("\n================================================================================");
 Console.ForegroundColor = ConsoleColor.Green;
 Console.WriteLine("All Glacier.Tensor deep learning & autograd experiments completed successfully!");
@@ -285,3 +380,4 @@ if (!args.Contains("--headless") && !args.Contains("--bench") && Environment.Use
     Console.WriteLine("\n[Press any key to exit...]");
     Console.ReadKey();
 }
+

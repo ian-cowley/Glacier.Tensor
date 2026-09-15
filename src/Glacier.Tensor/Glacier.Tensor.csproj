@@ -12,7 +12,7 @@
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Tensor</PackageId>
-    <Version>1.0.3</Version>
+    <Version>1.0.4</Version>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
     <Description>Pure C# N-dimensional strided tensor engine and zero-allocation autograd framework for .NET 10. Native alternative to TensorFlow and PyTorch with cache-blocked AVX-512 GEMM, Polaris DataFrame zero-copy ingestion, and bare-metal Glacier.Gpu acceleration.</Description>
