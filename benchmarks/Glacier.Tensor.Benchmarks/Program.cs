@@ -39,5 +39,7 @@ else
         Console.WriteLine($"[GEMM {size} x {size}] Average: {avgMs:F2} ms | Throughput: {gflops:F2} GFLOPS (AVX-512 FMA)");
     }
 
-    Console.WriteLine("\nAll benchmarks finished successfully.");
+    Console.WriteLine("\nAll GEMM microbenchmarks finished.\n");
+    LoraBenchmarks.RunQwenComparison();
 }
+
