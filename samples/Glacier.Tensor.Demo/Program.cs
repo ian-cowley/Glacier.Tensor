@@ -212,14 +212,25 @@ foreach (int benchSize in benchSizes)
         try { amdName = $"{Glacier.Gpu.Drivers.HipDriver.GetDeviceName(0)} (Zero-Copy Unified RAM)"; } catch { }
     }
 
-    var targetsToTest = new[]
+    var targetsToTest = new List<(GpuTarget Target, string Name)>
     {
-        (Target: GpuTarget.Cpu, Name: "CPU AVX-512 (Dynamic Core Scaling)"),
-        (Target: GpuTarget.Auto, Name: "Auto (Adaptive Hardware Dispatch)"),
-        (Target: GpuTarget.Amd, Name: amdName),
-        (Target: GpuTarget.Nvidia, Name: $"{nvName} (Bare-Metal {nvArch})"),
-        (Target: GpuTarget.NvidiaTensorCore, Name: $"{nvName} (Tensor Cores WMMA)")
+        (GpuTarget.Cpu, "CPU AVX-512 (Dynamic Core Scaling)"),
+        (GpuTarget.Auto, "Auto (Adaptive Hardware Dispatch)")
     };
+
+    if (GpuAccelerator.HasDirect3D12)
+        targetsToTest.Add((GpuTarget.Direct3D12, $"Direct3D 12 ({D3D12GemmKernel.DeviceName})"));
+
+    if (GpuAccelerator.HasVulkan)
+        targetsToTest.Add((GpuTarget.Vulkan, $"Vulkan 1.3 ({VulkanGemmKernel.DeviceName})"));
+
+    targetsToTest.Add((GpuTarget.Amd, amdName));
+
+    if (GpuAccelerator.HasNvidiaGpu)
+    {
+        targetsToTest.Add((GpuTarget.Nvidia, $"{nvName} (Bare-Metal {nvArch})"));
+        targetsToTest.Add((GpuTarget.NvidiaTensorCore, $"{nvName} (Tensor Cores WMMA)"));
+    }
 
     foreach (var (target, name) in targetsToTest)
     {
@@ -243,6 +254,8 @@ foreach (int benchSize in benchSizes)
             {
                 GpuTarget.NvidiaTensorCore => ConsoleColor.Magenta,
                 GpuTarget.Nvidia => ConsoleColor.Green,
+                GpuTarget.Direct3D12 => ConsoleColor.Blue,
+                GpuTarget.Vulkan => ConsoleColor.DarkYellow,
                 GpuTarget.Amd => ConsoleColor.Red,
                 GpuTarget.Auto => ConsoleColor.Cyan,
                 _ => ConsoleColor.White

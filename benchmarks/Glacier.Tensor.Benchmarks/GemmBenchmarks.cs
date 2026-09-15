@@ -29,6 +29,24 @@ public class GemmBenchmarks : IDisposable
         GemmKernels.MatMul(_matA!, _matB!, _matC!);
     }
 
+    [Benchmark(Description = "Glacier.Tensor Direct3D 12 GPU GEMM")]
+    public void BenchmarkDirect3D12()
+    {
+        if (GpuAccelerator.HasDirect3D12)
+        {
+            _matA!.MatMul(_matB!, _matC!, GpuTarget.Direct3D12);
+        }
+    }
+
+    [Benchmark(Description = "Glacier.Tensor Vulkan GPU GEMM")]
+    public void BenchmarkVulkan()
+    {
+        if (GpuAccelerator.HasVulkan)
+        {
+            _matA!.MatMul(_matB!, _matC!, GpuTarget.Vulkan);
+        }
+    }
+
     [GlobalCleanup]
     public void Cleanup()
     {

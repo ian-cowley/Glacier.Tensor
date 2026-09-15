@@ -37,5 +37,17 @@ public enum GpuTarget
     /// Targets 4th Generation Ada Lovelace Tensor Cores on NVIDIA RTX 4060 dGPU (WMMA hardware execution).
     /// Delivers 30–60+ TFLOPS throughput for half-precision and TensorFloat matrix multiplication.
     /// </summary>
-    NvidiaTensorCore = 5
+    NvidiaTensorCore = 5,
+
+    /// <summary>
+    /// Universal cross-platform GPU execution via Vulkan 1.3+ compute and SPIR-V tiled shaders.
+    /// Native acceleration across AMD Radeon, Intel Arc, and NVIDIA GPUs on Windows and Linux.
+    /// </summary>
+    Vulkan = 6,
+
+    /// <summary>
+    /// High-performance DirectX 12 Compute execution via Direct3D 12 and HLSL tiled shaders.
+    /// Native acceleration across AMD Radeon (RDNA 3.5 APU / dGPU), NVIDIA, and Intel on Windows.
+    /// </summary>
+    Direct3D12 = 7
 }

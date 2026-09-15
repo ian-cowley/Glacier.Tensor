@@ -84,6 +84,42 @@ public class GpuAcceleratorTests
     }
 
     [Fact]
+    public void MatMul_Direct3D12_IfHardwareAvailable_ComputesAccurateResult()
+    {
+        if (!GpuAccelerator.HasDirect3D12)
+        {
+            return;
+        }
+
+        int M = 128, K = 128, N = 128;
+        using var a = TensorFloatExtensions.RandomUniform([M, K], -1f, 1f, seed: 1313);
+        using var b = TensorFloatExtensions.RandomUniform([K, N], -1f, 1f, seed: 1414);
+        using var c = new Tensor<float>(M, N);
+
+        a.MatMul(b, c, GpuTarget.Direct3D12);
+
+        VerifyAgainstGroundTruth(a, b, c, M, K, N, tolerance: 1e-3f);
+    }
+
+    [Fact]
+    public void MatMul_Vulkan_IfHardwareAvailable_ComputesAccurateResult()
+    {
+        if (!GpuAccelerator.HasVulkan)
+        {
+            return;
+        }
+
+        int M = 128, K = 128, N = 128;
+        using var a = TensorFloatExtensions.RandomUniform([M, K], -1f, 1f, seed: 1515);
+        using var b = TensorFloatExtensions.RandomUniform([K, N], -1f, 1f, seed: 1616);
+        using var c = new Tensor<float>(M, N);
+
+        a.MatMul(b, c, GpuTarget.Vulkan);
+
+        VerifyAgainstGroundTruth(a, b, c, M, K, N, tolerance: 1e-3f);
+    }
+
+    [Fact]
     public void MatMul_DualGpu_ExecutesOrFallsBackGracefully()
     {
         int M = 128, K = 64, N = 96;

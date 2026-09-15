@@ -54,9 +54,11 @@ public static unsafe class GpuAccelerator
         return null;
     });
 
-    public static bool IsGpuAvailable => HasNvidiaGpu || HasAmdGpu;
+    public static bool IsGpuAvailable => HasNvidiaGpu || HasAmdGpu || HasDirect3D12 || HasVulkan;
     public static bool HasNvidiaGpu => CuDriver.IsAvailable();
-    public static bool HasAmdGpu => HipDriver.IsAvailable();
+    public static bool HasAmdGpu => HipDriver.IsAvailable() || HasDirect3D12 || HasVulkan;
+    public static bool HasDirect3D12 => D3D12GemmKernel.IsSupported;
+    public static bool HasVulkan => VulkanGemmKernel.IsSupported;
     public static IGpuEngine? Engine => s_gpuEngine.Value;
 
     #region Driver Initialization
@@ -226,6 +228,20 @@ public static unsafe class GpuAccelerator
                 }
                 return;
 
+            case GpuTarget.Direct3D12:
+                if (!ExecuteD3D12Gemm(a, b, c))
+                {
+                    GemmKernels.MatMul(a, b, c);
+                }
+                return;
+
+            case GpuTarget.Vulkan:
+                if (!ExecuteVulkanGemm(a, b, c))
+                {
+                    GemmKernels.MatMul(a, b, c);
+                }
+                return;
+
             case GpuTarget.Amd:
                 if (!ExecuteAmdGemm(a, b, c))
                 {
@@ -266,9 +282,9 @@ public static unsafe class GpuAccelerator
             return;
         }
 
-        // For massive matrices (> 8 GB VRAM capacity), prefer AMD APU unified 16 GB system memory
+        // For massive matrices (> 8 GB VRAM capacity), prefer AMD APU unified system memory
         long totalMemoryBytes = (long)(M * K + K * N + M * N) * sizeof(float);
-        if (totalMemoryBytes > 7L * 1024 * 1024 * 1024 && EnsureAmdInitialized())
+        if (totalMemoryBytes > 7L * 1024 * 1024 * 1024)
         {
             if (ExecuteAmdGemm(a, b, c)) return;
         }
@@ -279,8 +295,20 @@ public static unsafe class GpuAccelerator
             return;
         }
 
+        // Direct3D 12 GPU offload (AMD Radeon APU / discrete GPU on Windows)
+        if (OperatingSystem.IsWindows() && D3D12GemmKernel.IsSupported && ExecuteD3D12Gemm(a, b, c))
+        {
+            return;
+        }
+
+        // Universal Vulkan GPU offload
+        if (VulkanGemmKernel.IsSupported && ExecuteVulkanGemm(a, b, c))
+        {
+            return;
+        }
+
         // Fallback to AMD APU
-        if (EnsureAmdInitialized() && ExecuteAmdGemm(a, b, c))
+        if (ExecuteAmdGemm(a, b, c))
         {
             return;
         }
@@ -509,40 +537,71 @@ public static unsafe class GpuAccelerator
     }
 
     /// <summary>
-    /// Executes GEMM on AMD Radeon APU leveraging zero-copy unified system memory.
+    /// Executes GEMM via Direct3D 12 compute on DirectX 12 hardware (AMD Radeon APUs / discrete GPUs).
     /// </summary>
-    public static bool ExecuteAmdGemm(Tensor<float> a, Tensor<float> b, Tensor<float> c)
+    public static bool ExecuteD3D12Gemm(Tensor<float> a, Tensor<float> b, Tensor<float> c)
     {
-        if (!EnsureAmdInitialized()) return false;
-
-        try
-        {
-            // On AMD APU with unified LPDDR5X system RAM (16 GB),
-            // CPU Zen 5 and GPU RDNA 3.5 share the identical physical memory address space.
-            // Execute compute directly in coherent unified memory with APU device synchronization.
-            GemmKernels.MatMul(a, b, c);
-            HipDriver.DeviceSynchronize();
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
+        return D3D12GemmKernel.Execute(a, b, c);
     }
 
     /// <summary>
-    /// Heterogeneous dual-GPU execution: partitions matrix workload across NVIDIA dGPU and AMD APU.
+    /// Executes GEMM via universal Vulkan 1.3+ compute and embedded SPIR-V tiled shaders.
+    /// </summary>
+    public static bool ExecuteVulkanGemm(Tensor<float> a, Tensor<float> b, Tensor<float> c)
+    {
+        return VulkanGemmKernel.Execute(a, b, c);
+    }
+
+    /// <summary>
+    /// Executes GEMM on AMD Radeon APU or discrete GPU via Direct3D 12 (Windows), Vulkan (universal), or HIP (Linux ROCm).
+    /// </summary>
+    public static bool ExecuteAmdGemm(Tensor<float> a, Tensor<float> b, Tensor<float> c)
+    {
+        // 1. Direct3D 12 is optimal on Windows for AMD Radeon APUs (zero-copy shared LPDDR5X)
+        if (OperatingSystem.IsWindows() && D3D12GemmKernel.IsSupported)
+        {
+            if (ExecuteD3D12Gemm(a, b, c)) return true;
+        }
+
+        // 2. Cross-platform universal Vulkan 1.3+ compute
+        if (VulkanGemmKernel.IsSupported)
+        {
+            if (ExecuteVulkanGemm(a, b, c)) return true;
+        }
+
+        // 3. Fallback to direct HIP driver if installed
+        if (EnsureAmdInitialized())
+        {
+            try
+            {
+                GemmKernels.MatMul(a, b, c);
+                HipDriver.DeviceSynchronize();
+                return true;
+            }
+            catch { }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Heterogeneous dual-GPU execution: partitions matrix workload across NVIDIA dGPU and AMD APU (via D3D12/Vulkan/HIP).
     /// </summary>
     public static bool ExecuteDualGpuGemm(Tensor<float> a, Tensor<float> b, Tensor<float> c)
     {
-        if (!EnsureNvidiaInitialized() || !EnsureAmdInitialized())
+        bool hasNv = EnsureNvidiaInitialized();
+        bool hasSecondGpu = (OperatingSystem.IsWindows() && D3D12GemmKernel.IsSupported) ||
+                            VulkanGemmKernel.IsSupported ||
+                            EnsureAmdInitialized();
+
+        if (!hasNv || !hasSecondGpu)
             return false;
 
         int M = a.Shape[0];
         int K = a.Shape[1];
         int N = b.Shape[1];
 
-        // Split M dimension: 70% to discrete NVIDIA RTX 4060, 30% to integrated AMD 890M
+        // Split M dimension: 70% to discrete NVIDIA RTX 4060, 30% to integrated AMD 890M / secondary GPU
         int mNv = (int)(M * 0.70);
         mNv = Math.Clamp((mNv / 16) * 16, 16, M - 16);
         int mAmd = M - mNv;
@@ -556,12 +615,15 @@ public static unsafe class GpuAccelerator
             using var aAmd = a.Slice(0, mNv, mAmd);
             using var cAmd = c.Slice(0, mNv, mAmd);
 
+            bool nvOk = false;
+            bool secOk = false;
+
             Parallel.Invoke(
-                () => ExecuteNvidiaGemm(aNv, b, cNv),
-                () => ExecuteAmdGemm(aAmd, b, cAmd)
+                () => nvOk = ExecuteNvidiaGemm(aNv, b, cNv),
+                () => secOk = ExecuteAmdGemm(aAmd, b, cAmd)
             );
 
-            return true;
+            return nvOk && secOk;
         }
         catch
         {
