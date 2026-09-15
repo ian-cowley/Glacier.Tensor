@@ -13,7 +13,7 @@ public sealed class AdamW : IOptimizer
     private readonly List<Tensor<float>> _parameters = new();
     private readonly List<Tensor<float>> _m = new();
     private readonly List<Tensor<float>> _v = new();
-    private readonly float _lr;
+    private float _lr;
     private readonly float _beta1;
     private readonly float _beta2;
     private readonly float _eps;
@@ -21,7 +21,7 @@ public sealed class AdamW : IOptimizer
     private int _stepCount;
     private bool _disposed;
 
-    public float LearningRate => _lr;
+    public float LearningRate { get => _lr; set => _lr = value; }
 
     public AdamW(
         IEnumerable<Tensor<float>> parameters,
