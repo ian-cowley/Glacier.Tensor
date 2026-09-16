@@ -364,39 +364,39 @@ public static unsafe class GpuAccelerator
                 d_a = s_pooledDevA;
                 d_b = s_pooledDevB;
                 d_c = s_pooledDevC;
-            }
 
-            fixed (float* pA = a.AsSpan(), pB = b.AsSpan(), pC = c.AsSpan())
-            {
-                CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bytesA);
-                CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bytesB);
+                fixed (float* pA = a.AsSpan(), pB = b.AsSpan(), pC = c.AsSpan())
+                {
+                    CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bytesA);
+                    CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bytesB);
 
-                void** kernelParams = stackalloc void*[6];
-                kernelParams[0] = &d_a;
-                kernelParams[1] = &d_b;
-                kernelParams[2] = &d_c;
-                kernelParams[3] = &M;
-                kernelParams[4] = &N;
-                kernelParams[5] = &K;
+                    void** kernelParams = stackalloc void*[6];
+                    kernelParams[0] = &d_a;
+                    kernelParams[1] = &d_b;
+                    kernelParams[2] = &d_c;
+                    kernelParams[3] = &M;
+                    kernelParams[4] = &N;
+                    kernelParams[5] = &K;
 
-                // Fast GEMM computes a 64x64 block per CTA using 256 threads (16x16)
-                uint gridX = (uint)((N + 63) / 64);
-                uint gridY = (uint)((M + 63) / 64);
+                    // Fast GEMM computes a 64x64 block per CTA using 256 threads (16x16)
+                    uint gridX = (uint)((N + 63) / 64);
+                    uint gridY = (uint)((M + 63) / 64);
 
-                int launchRes = CuDriver.LaunchKernel(
-                    s_cuGemmFn,
-                    gridX, gridY, 1,
-                    16, 16, 1,
-                    0, IntPtr.Zero,
-                    (IntPtr)kernelParams,
-                    IntPtr.Zero
-                );
+                    int launchRes = CuDriver.LaunchKernel(
+                        s_cuGemmFn,
+                        gridX, gridY, 1,
+                        16, 16, 1,
+                        0, IntPtr.Zero,
+                        (IntPtr)kernelParams,
+                        IntPtr.Zero
+                    );
 
-                if (launchRes != 0) return false;
+                    if (launchRes != 0) return false;
 
-                CuDriver.CtxSynchronize();
-                CuDriver.MemcpyDtoH((IntPtr)pC, d_c, bytesC);
-                return true;
+                    CuDriver.CtxSynchronize();
+                    CuDriver.MemcpyDtoH((IntPtr)pC, d_c, bytesC);
+                    return true;
+                }
             }
         }
         catch
@@ -453,39 +453,39 @@ public static unsafe class GpuAccelerator
                 d_a = s_pooledDevA;
                 d_b = s_pooledDevB;
                 d_c = s_pooledDevC;
-            }
 
-            fixed (float* pA = a.AsSpan(), pB = b.AsSpan(), pC = c.AsSpan())
-            {
-                CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bytesA);
-                CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bytesB);
+                fixed (float* pA = a.AsSpan(), pB = b.AsSpan(), pC = c.AsSpan())
+                {
+                    CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bytesA);
+                    CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bytesB);
 
-                void** kernelParams = stackalloc void*[6];
-                kernelParams[0] = &d_a;
-                kernelParams[1] = &d_b;
-                kernelParams[2] = &d_c;
-                kernelParams[3] = &M;
-                kernelParams[4] = &N;
-                kernelParams[5] = &K;
+                    void** kernelParams = stackalloc void*[6];
+                    kernelParams[0] = &d_a;
+                    kernelParams[1] = &d_b;
+                    kernelParams[2] = &d_c;
+                    kernelParams[3] = &M;
+                    kernelParams[4] = &N;
+                    kernelParams[5] = &K;
 
-                // Tensor Core kernel computes a 16x16 block per warp (32 threads)
-                uint gridX = (uint)((M + 15) / 16);
-                uint gridY = (uint)((N + 15) / 16);
+                    // Tensor Core kernel computes a 16x16 block per warp (32 threads)
+                    uint gridX = (uint)((M + 15) / 16);
+                    uint gridY = (uint)((N + 15) / 16);
 
-                int launchRes = CuDriver.LaunchKernel(
-                    s_cuTensorCoreFp32Fn,
-                    gridX, gridY, 1,
-                    32, 1, 1,
-                    0, IntPtr.Zero,
-                    (IntPtr)kernelParams,
-                    IntPtr.Zero
-                );
+                    int launchRes = CuDriver.LaunchKernel(
+                        s_cuTensorCoreFp32Fn,
+                        gridX, gridY, 1,
+                        32, 1, 1,
+                        0, IntPtr.Zero,
+                        (IntPtr)kernelParams,
+                        IntPtr.Zero
+                    );
 
-                if (launchRes != 0) return false;
+                    if (launchRes != 0) return false;
 
-                CuDriver.CtxSynchronize();
-                CuDriver.MemcpyDtoH((IntPtr)pC, d_c, bytesC);
-                return true;
+                    CuDriver.CtxSynchronize();
+                    CuDriver.MemcpyDtoH((IntPtr)pC, d_c, bytesC);
+                    return true;
+                }
             }
         }
         catch
