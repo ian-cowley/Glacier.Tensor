@@ -338,8 +338,6 @@ public static unsafe class GpuAccelerator
         IntPtr d_b = IntPtr.Zero;
         IntPtr d_c = IntPtr.Zero;
 
-        GCHandle h0 = default, h1 = default, h2 = default, h3 = default, h4 = default, h5 = default, hArray = default;
-
         try
         {
             lock (s_initLock)
@@ -373,22 +371,13 @@ public static unsafe class GpuAccelerator
                 CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bytesA);
                 CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bytesB);
 
-                IntPtr[] kernelParams = new IntPtr[6];
-                h0 = GCHandle.Alloc(d_a, GCHandleType.Pinned);
-                h1 = GCHandle.Alloc(d_b, GCHandleType.Pinned);
-                h2 = GCHandle.Alloc(d_c, GCHandleType.Pinned);
-                h3 = GCHandle.Alloc(M, GCHandleType.Pinned);
-                h4 = GCHandle.Alloc(N, GCHandleType.Pinned);
-                h5 = GCHandle.Alloc(K, GCHandleType.Pinned);
-
-                kernelParams[0] = h0.AddrOfPinnedObject();
-                kernelParams[1] = h1.AddrOfPinnedObject();
-                kernelParams[2] = h2.AddrOfPinnedObject();
-                kernelParams[3] = h3.AddrOfPinnedObject();
-                kernelParams[4] = h4.AddrOfPinnedObject();
-                kernelParams[5] = h5.AddrOfPinnedObject();
-
-                hArray = GCHandle.Alloc(kernelParams, GCHandleType.Pinned);
+                void** kernelParams = stackalloc void*[6];
+                kernelParams[0] = &d_a;
+                kernelParams[1] = &d_b;
+                kernelParams[2] = &d_c;
+                kernelParams[3] = &M;
+                kernelParams[4] = &N;
+                kernelParams[5] = &K;
 
                 // Fast GEMM computes a 64x64 block per CTA using 256 threads (16x16)
                 uint gridX = (uint)((N + 63) / 64);
@@ -399,7 +388,7 @@ public static unsafe class GpuAccelerator
                     gridX, gridY, 1,
                     16, 16, 1,
                     0, IntPtr.Zero,
-                    hArray.AddrOfPinnedObject(),
+                    (IntPtr)kernelParams,
                     IntPtr.Zero
                 );
 
@@ -413,16 +402,6 @@ public static unsafe class GpuAccelerator
         catch
         {
             return false;
-        }
-        finally
-        {
-            if (h0.IsAllocated) h0.Free();
-            if (h1.IsAllocated) h1.Free();
-            if (h2.IsAllocated) h2.Free();
-            if (h3.IsAllocated) h3.Free();
-            if (h4.IsAllocated) h4.Free();
-            if (h5.IsAllocated) h5.Free();
-            if (hArray.IsAllocated) hArray.Free();
         }
     }
 
@@ -448,8 +427,6 @@ public static unsafe class GpuAccelerator
         IntPtr d_b = IntPtr.Zero;
         IntPtr d_c = IntPtr.Zero;
 
-        GCHandle h0 = default, h1 = default, h2 = default, h3 = default, h4 = default, h5 = default, hArray = default;
-
         try
         {
             lock (s_initLock)
@@ -483,22 +460,13 @@ public static unsafe class GpuAccelerator
                 CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bytesA);
                 CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bytesB);
 
-                IntPtr[] kernelParams = new IntPtr[6];
-                h0 = GCHandle.Alloc(d_a, GCHandleType.Pinned);
-                h1 = GCHandle.Alloc(d_b, GCHandleType.Pinned);
-                h2 = GCHandle.Alloc(d_c, GCHandleType.Pinned);
-                h3 = GCHandle.Alloc(M, GCHandleType.Pinned);
-                h4 = GCHandle.Alloc(N, GCHandleType.Pinned);
-                h5 = GCHandle.Alloc(K, GCHandleType.Pinned);
-
-                kernelParams[0] = h0.AddrOfPinnedObject();
-                kernelParams[1] = h1.AddrOfPinnedObject();
-                kernelParams[2] = h2.AddrOfPinnedObject();
-                kernelParams[3] = h3.AddrOfPinnedObject();
-                kernelParams[4] = h4.AddrOfPinnedObject();
-                kernelParams[5] = h5.AddrOfPinnedObject();
-
-                hArray = GCHandle.Alloc(kernelParams, GCHandleType.Pinned);
+                void** kernelParams = stackalloc void*[6];
+                kernelParams[0] = &d_a;
+                kernelParams[1] = &d_b;
+                kernelParams[2] = &d_c;
+                kernelParams[3] = &M;
+                kernelParams[4] = &N;
+                kernelParams[5] = &K;
 
                 // Tensor Core kernel computes a 16x16 block per warp (32 threads)
                 uint gridX = (uint)((M + 15) / 16);
@@ -509,7 +477,7 @@ public static unsafe class GpuAccelerator
                     gridX, gridY, 1,
                     32, 1, 1,
                     0, IntPtr.Zero,
-                    hArray.AddrOfPinnedObject(),
+                    (IntPtr)kernelParams,
                     IntPtr.Zero
                 );
 
@@ -523,16 +491,6 @@ public static unsafe class GpuAccelerator
         catch
         {
             return false;
-        }
-        finally
-        {
-            if (h0.IsAllocated) h0.Free();
-            if (h1.IsAllocated) h1.Free();
-            if (h2.IsAllocated) h2.Free();
-            if (h3.IsAllocated) h3.Free();
-            if (h4.IsAllocated) h4.Free();
-            if (h5.IsAllocated) h5.Free();
-            if (hArray.IsAllocated) hArray.Free();
         }
     }
 
