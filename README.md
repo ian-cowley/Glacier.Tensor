@@ -184,7 +184,8 @@ using var mergedModel = lora.Merge();
 `Glacier.Tensor` is designed to seamlessly integrate with the other engines in the **Glacier .NET 10 High-Performance Ecosystem**:
 
 - **[Master Architecture Plan](../../GLACIER_ECOSYSTEM_MASTER_PLAN.md)**: Ecosystem blueprint mapping the 9 Python domains to .NET 10 counterparts.
-- **[Glacier.Tensor Technical Specification](../../docs/plans/03_GLACIER_TENSOR_NEURAL_SPEC.md)**: Mathematical models, SIMD GEMM kernels, and autograd tape design.
+- **[Glacier.Inference](https://github.com/ian-cowley/Glacier.Inference)**: High-performance GGUF inference engine with SIMD AVX-512, D3D12, and Vulkan tensor cores.
+- **[Glacier.Tune](https://github.com/ian-cowley/Glacier.Tune)**: Parameter-efficient fine-tuning (PEFT), LoRA/QLoRA, and causal transformer backpropagation.
 - **[Glacier.Polaris](https://github.com/ian-cowley/Glacier.Polaris)**: Arrow columnar memory backend providing zero-copy feature feeds.
 - **[Glacier.ML](https://github.com/ian-cowley/Glacier.ML)**: Classical machine learning algorithms and histogram-based tree engines.
 - **[Glacier.Serve](https://github.com/ian-cowley/Glacier.Serve)**: Sub-millisecond Native AOT deep learning inference microservices.
