@@ -334,7 +334,12 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_devicePointer != IntPtr.Zero) return true;
         if (!CuDriver.IsAvailable()) return false;
+        return AllocateDeviceMemoryCore();
+    }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool AllocateDeviceMemoryCore()
+    {
         nuint bytes = (nuint)(ElementCount * sizeof(T));
         int res = CuDriver.MemAlloc(out _devicePointer, bytes);
         return res == 0 && _devicePointer != IntPtr.Zero;
@@ -348,7 +353,12 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_devicePointer == IntPtr.Zero && !AllocateDeviceMemory())
             return false;
+        return CopyToDeviceCore(stream);
+    }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool CopyToDeviceCore(IntPtr stream)
+    {
         nuint bytes = (nuint)(ElementCount * sizeof(T));
         fixed (T* ptr = AsSpan())
         {
@@ -370,7 +380,13 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_devicePointer == IntPtr.Zero) return false;
+        if (!CuDriver.IsAvailable()) return false;
+        return CopyToHostCore(stream);
+    }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool CopyToHostCore(IntPtr stream)
+    {
         nuint bytes = (nuint)(ElementCount * sizeof(T));
         fixed (T* ptr = AsSpan())
         {
@@ -392,7 +408,19 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     {
         if (_devicePointer != IntPtr.Zero)
         {
-            CuDriver.MemFree(_devicePointer);
+            FreeDeviceMemoryCore();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void FreeDeviceMemoryCore()
+    {
+        if (_devicePointer != IntPtr.Zero)
+        {
+            if (CuDriver.IsAvailable())
+            {
+                CuDriver.MemFree(_devicePointer);
+            }
             _devicePointer = IntPtr.Zero;
         }
     }
