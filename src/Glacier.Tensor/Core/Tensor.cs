@@ -3,12 +3,14 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
+using Glacier.Gpu.Drivers;
 
 namespace Glacier.Tensor.Core;
 
 /// <summary>
 /// High-performance N-dimensional strided tensor backed by 64-byte aligned unmanaged memory.
 /// Delivers zero-allocation views (slicing, transposition, reshaping) and AVX-512 vectorization.
+/// Supports device-resident GPU memory buffers (CUdeviceptr) to eliminate PCIe transfer ping-pongs.
 /// </summary>
 public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
 {
@@ -23,6 +25,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     private Tensor<T>? _grad;
     private bool _requiresGrad;
     private bool _disposed;
+    private IntPtr _devicePointer;
 
     public int TensorId => _tensorId;
     public int Rank => _shape.Rank;
@@ -32,6 +35,8 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     public bool IsContiguous => _isContiguous;
     public long ElementOffset => _elementOffset;
     public NativeMemoryBlock<T> MemoryBlock => _memory;
+    public IntPtr DevicePointer => _devicePointer;
+    public bool IsDeviceResident => _devicePointer != IntPtr.Zero;
 
     public Tensor<T>? Grad
     {
@@ -321,11 +326,83 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         return FromSpan(data.AsSpan(), shape);
     }
 
+    /// <summary>
+    /// Allocates unmanaged GPU device memory (CUdeviceptr) for this tensor.
+    /// </summary>
+    public bool AllocateDeviceMemory()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_devicePointer != IntPtr.Zero) return true;
+        if (!CuDriver.IsAvailable()) return false;
+
+        nuint bytes = (nuint)(ElementCount * sizeof(T));
+        int res = CuDriver.MemAlloc(out _devicePointer, bytes);
+        return res == 0 && _devicePointer != IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// Copies tensor data from host memory to allocated GPU device memory.
+    /// </summary>
+    public bool CopyToDevice(IntPtr stream = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_devicePointer == IntPtr.Zero && !AllocateDeviceMemory())
+            return false;
+
+        nuint bytes = (nuint)(ElementCount * sizeof(T));
+        fixed (T* ptr = AsSpan())
+        {
+            if (stream == IntPtr.Zero)
+            {
+                return CuDriver.MemcpyHtoD(_devicePointer, (IntPtr)ptr, bytes) == 0;
+            }
+            else
+            {
+                return CuDriver.MemcpyHtoDAsync(_devicePointer, (IntPtr)ptr, bytes, stream) == 0;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Copies tensor data from GPU device memory back to host memory.
+    /// </summary>
+    public bool CopyToHost(IntPtr stream = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_devicePointer == IntPtr.Zero) return false;
+
+        nuint bytes = (nuint)(ElementCount * sizeof(T));
+        fixed (T* ptr = AsSpan())
+        {
+            if (stream == IntPtr.Zero)
+            {
+                return CuDriver.MemcpyDtoH((IntPtr)ptr, _devicePointer, bytes) == 0;
+            }
+            else
+            {
+                return CuDriver.MemcpyDtoHAsync((IntPtr)ptr, _devicePointer, bytes, stream) == 0;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Frees allocated GPU device memory.
+    /// </summary>
+    public void FreeDeviceMemory()
+    {
+        if (_devicePointer != IntPtr.Zero)
+        {
+            CuDriver.MemFree(_devicePointer);
+            _devicePointer = IntPtr.Zero;
+        }
+    }
+
     public void Dispose()
     {
         if (!_disposed)
         {
             _disposed = true;
+            FreeDeviceMemory();
             _grad?.Dispose();
             _grad = null;
             _memory.Dispose();

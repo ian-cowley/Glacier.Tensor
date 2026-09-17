@@ -60,41 +60,112 @@ StructuredBuffer<float> A : register(t0);
 StructuredBuffer<float> B : register(t1);
 RWStructuredBuffer<float> C : register(u0);
 
-#define TILE_SIZE 16
-groupshared float sA[TILE_SIZE][TILE_SIZE];
-groupshared float sB[TILE_SIZE][TILE_SIZE];
+#define BK 16
+#define BM 64
+#define BN 64
+#define TM 4
+#define TN 4
 
-[numthreads(TILE_SIZE, TILE_SIZE, 1)]
+groupshared float sA[BM][BK];
+groupshared float sB[BK][BN];
+
+[numthreads(16, 16, 1)]
 void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
 {
-    uint row = gId.y * TILE_SIZE + tId.y;
-    uint col = gId.x * TILE_SIZE + tId.x;
+    uint linearTid = tId.y * 16 + tId.x;
+    uint numTiles = (K + BK - 1) / BK;
 
-    float acc = 0.0f;
-    uint numTiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+    uint threadRow = tId.y * TM;
+    uint threadCol = tId.x * TN;
+
+    uint globalRow = gId.y * BM + threadRow;
+    uint globalCol = gId.x * BN + threadCol;
+
+    float acc[TM][TN];
+    [unroll]
+    for (uint i = 0; i < TM; ++i)
+    {
+        [unroll]
+        for (uint j = 0; j < TN; ++j)
+        {
+            acc[i][j] = 0.0f;
+        }
+    }
+
+    uint aLoadRow = linearTid / 4;
+    uint aLoadCol = (linearTid % 4) * 4;
+    uint aGlobalRow = gId.y * BM + aLoadRow;
+
+    uint bLoadRow = linearTid / 16;
+    uint bLoadCol = (linearTid % 16) * 4;
+    uint bGlobalCol = gId.x * BN + bLoadCol;
 
     for (uint tile = 0; tile < numTiles; ++tile)
     {
-        uint aCol = tile * TILE_SIZE + tId.x;
-        uint bRow = tile * TILE_SIZE + tId.y;
+        uint aGlobalCol = tile * BK + aLoadCol;
+        [unroll]
+        for (uint c = 0; c < 4; ++c)
+        {
+            uint ac = aGlobalCol + c;
+            sA[aLoadRow][aLoadCol + c] = (aGlobalRow < M && ac < K) ? A[aGlobalRow * K + ac] : 0.0f;
+        }
 
-        sA[tId.y][tId.x] = (row < M && aCol < K) ? A[row * K + aCol] : 0.0f;
-        sB[tId.y][tId.x] = (bRow < K && col < N) ? B[bRow * N + col] : 0.0f;
+        uint bGlobalRow = tile * BK + bLoadRow;
+        [unroll]
+        for (uint r = 0; r < 4; ++r)
+        {
+            uint br = bGlobalRow;
+            uint bc = bGlobalCol + r;
+            sB[bLoadRow][bLoadCol + r] = (br < K && bc < N) ? B[br * N + bc] : 0.0f;
+        }
 
         GroupMemoryBarrierWithGroupSync();
 
         [unroll]
-        for (uint k = 0; k < TILE_SIZE; ++k)
+        for (uint k = 0; k < BK; ++k)
         {
-            acc += sA[tId.y][k] * sB[k][tId.x];
+            float regA[TM];
+            float regB[TN];
+
+            [unroll]
+            for (uint r = 0; r < TM; ++r)
+            {
+                regA[r] = sA[threadRow + r][k];
+            }
+
+            [unroll]
+            for (uint c = 0; c < TN; ++c)
+            {
+                regB[c] = sB[k][threadCol + c];
+            }
+
+            [unroll]
+            for (uint r = 0; r < TM; ++r)
+            {
+                [unroll]
+                for (uint c = 0; c < TN; ++c)
+                {
+                    acc[r][c] += regA[r] * regB[c];
+                }
+            }
         }
 
         GroupMemoryBarrierWithGroupSync();
     }
 
-    if (row < M && col < N)
+    [unroll]
+    for (uint r = 0; r < TM; ++r)
     {
-        C[row * N + col] = acc;
+        [unroll]
+        for (uint c = 0; c < TN; ++c)
+        {
+            uint cr = globalRow + r;
+            uint cc = globalCol + c;
+            if (cr < M && cc < N)
+            {
+                C[cr * N + cc] = acc[r][c];
+            }
+        }
     }
 }
 ";
@@ -211,11 +282,12 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
 
     private static void EnsureBuffers(ulong bytesA, ulong bytesB, ulong bytesC)
     {
+        const ulong initCap = 16 * 1024 * 1024; // 16 MB persistent GPU heap
         if (s_devA == null || s_capA < bytesA)
         {
             s_devA?.Dispose();
             s_uploadA?.Dispose();
-            s_capA = Math.Max(bytesA, 1024 * 1024);
+            s_capA = Math.Max(bytesA, Math.Max(initCap, (ulong)(s_capA * 1.5)));
             s_devA = CreateDeviceBuffer(s_capA);
             s_uploadA = CreateUploadBuffer(s_capA);
         }
@@ -224,7 +296,7 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
         {
             s_devB?.Dispose();
             s_uploadB?.Dispose();
-            s_capB = Math.Max(bytesB, 1024 * 1024);
+            s_capB = Math.Max(bytesB, Math.Max(initCap, (ulong)(s_capB * 1.5)));
             s_devB = CreateDeviceBuffer(s_capB);
             s_uploadB = CreateUploadBuffer(s_capB);
         }
@@ -233,7 +305,7 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
         {
             s_devC?.Dispose();
             s_readbackC?.Dispose();
-            s_capC = Math.Max(bytesC, 1024 * 1024);
+            s_capC = Math.Max(bytesC, Math.Max(initCap, (ulong)(s_capC * 1.5)));
             s_devC = CreateDeviceBuffer(s_capC, ResourceFlags.AllowUnorderedAccess);
             s_readbackC = CreateReadbackBuffer(s_capC);
         }
@@ -332,9 +404,9 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                 s_cmdList.SetComputeRootShaderResourceView(2, s_devB!.GPUVirtualAddress);
                 s_cmdList.SetComputeRootUnorderedAccessView(3, s_devC!.GPUVirtualAddress);
 
-                // Dispatch
-                uint gridX = (uint)((N + 15) / 16);
-                uint gridY = (uint)((M + 15) / 16);
+                // Dispatch 64x64 block tiles
+                uint gridX = (uint)((N + 63) / 64);
+                uint gridY = (uint)((M + 63) / 64);
                 s_cmdList.Dispatch(gridX, gridY, 1);
 
                 // Transition C for readback and revert A, B

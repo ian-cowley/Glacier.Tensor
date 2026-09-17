@@ -54,8 +54,12 @@ public static unsafe class GemmKernels
             int parallelism = TensorConcurrency.GetEffectiveParallelism(maxDegreeOfParallelism);
             long totalOps = (long)M * N * K;
 
+            int numMBlocks = (M + BLOCK_M - 1) / BLOCK_M;
+            int numNBlocks = (N + BLOCK_N - 1) / BLOCK_N;
+            int totalBlocks = numMBlocks * numNBlocks;
+
             // Sequential path for small matrices or single-thread requests
-            if (parallelism <= 1 || totalOps < 64 * 64 * 64)
+            if (parallelism <= 1 || totalOps < 64 * 64 * 64 || totalBlocks <= 1)
             {
                 for (int m0 = 0; m0 < M; m0 += BLOCK_M)
                 {
@@ -78,30 +82,31 @@ public static unsafe class GemmKernels
             }
             else
             {
-                int numMBlocks = (M + BLOCK_M - 1) / BLOCK_M;
                 var parallelOptions = new System.Threading.Tasks.ParallelOptions
                 {
                     MaxDegreeOfParallelism = parallelism
                 };
 
-                System.Threading.Tasks.Parallel.For(0, numMBlocks, parallelOptions, blockIdx =>
+                System.Threading.Tasks.Parallel.For(0, totalBlocks, parallelOptions, blockIdx =>
                 {
-                    int m0 = blockIdx * BLOCK_M;
+                    int mBlock = blockIdx / numNBlocks;
+                    int nBlock = blockIdx % numNBlocks;
+
+                    int m0 = mBlock * BLOCK_M;
                     int m_len = Math.Min(BLOCK_M, M - m0);
 
-                    for (int n0 = 0; n0 < N; n0 += BLOCK_N)
+                    int n0 = nBlock * BLOCK_N;
+                    int n_len = Math.Min(BLOCK_N, N - n0);
+
+                    for (int k0 = 0; k0 < K; k0 += BLOCK_K)
                     {
-                        int n_len = Math.Min(BLOCK_N, N - n0);
-                        for (int k0 = 0; k0 < K; k0 += BLOCK_K)
-                        {
-                            int k_len = Math.Min(BLOCK_K, K - k0);
-                            BlockMultiply(
-                                pA + (long)m0 * lda + k0,
-                                pB + (long)k0 * ldb + n0,
-                                pC + (long)m0 * ldc + n0,
-                                lda, ldb, ldc,
-                                m_len, n_len, k_len);
-                        }
+                        int k_len = Math.Min(BLOCK_K, K - k0);
+                        BlockMultiply(
+                            pA + (long)m0 * lda + k0,
+                            pB + (long)k0 * ldb + n0,
+                            pC + (long)m0 * ldc + n0,
+                            lda, ldb, ldc,
+                            m_len, n_len, k_len);
                     }
                 });
             }

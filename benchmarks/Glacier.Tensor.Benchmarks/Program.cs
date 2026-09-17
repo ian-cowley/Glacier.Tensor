@@ -41,5 +41,7 @@ else
 
     Console.WriteLine("\nAll GEMM microbenchmarks finished.\n");
     LoraBenchmarks.RunQwenComparison();
+    GpuBenchmarks.RunGpuComparison();
+    GpuBenchmarks.RunD3D12Benchmark();
 }
 

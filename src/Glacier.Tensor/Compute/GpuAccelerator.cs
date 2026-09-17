@@ -340,6 +340,37 @@ public static unsafe class GpuAccelerator
 
         try
         {
+            if (a.IsDeviceResident && b.IsDeviceResident && c.IsDeviceResident)
+            {
+                IntPtr devA = a.DevicePointer;
+                IntPtr devB = b.DevicePointer;
+                IntPtr devC = c.DevicePointer;
+
+                void** kParams = stackalloc void*[6];
+                kParams[0] = &devA;
+                kParams[1] = &devB;
+                kParams[2] = &devC;
+                kParams[3] = &M;
+                kParams[4] = &N;
+                kParams[5] = &K;
+
+                uint gX = (uint)((N + 63) / 64);
+                uint gY = (uint)((M + 63) / 64);
+
+                int lRes = CuDriver.LaunchKernel(
+                    s_cuGemmFn,
+                    gX, gY, 1,
+                    16, 16, 1,
+                    0, IntPtr.Zero,
+                    (IntPtr)kParams,
+                    IntPtr.Zero
+                );
+
+                if (lRes != 0) return false;
+                CuDriver.CtxSynchronize();
+                return true;
+            }
+
             lock (s_initLock)
             {
                 if (bytesA > s_pooledCapA)
@@ -429,6 +460,37 @@ public static unsafe class GpuAccelerator
 
         try
         {
+            if (a.IsDeviceResident && b.IsDeviceResident && c.IsDeviceResident)
+            {
+                IntPtr devA = a.DevicePointer;
+                IntPtr devB = b.DevicePointer;
+                IntPtr devC = c.DevicePointer;
+
+                void** kParams = stackalloc void*[6];
+                kParams[0] = &devA;
+                kParams[1] = &devB;
+                kParams[2] = &devC;
+                kParams[3] = &M;
+                kParams[4] = &N;
+                kParams[5] = &K;
+
+                uint gX = (uint)((M + 15) / 16);
+                uint gY = (uint)((N + 15) / 16);
+
+                int lRes = CuDriver.LaunchKernel(
+                    s_cuTensorCoreFp32Fn,
+                    gX, gY, 1,
+                    32, 1, 1,
+                    0, IntPtr.Zero,
+                    (IntPtr)kParams,
+                    IntPtr.Zero
+                );
+
+                if (lRes != 0) return false;
+                CuDriver.CtxSynchronize();
+                return true;
+            }
+
             lock (s_initLock)
             {
                 if (bytesA > s_pooledCapA)
@@ -527,18 +589,8 @@ public static unsafe class GpuAccelerator
             if (ExecuteVulkanGemm(a, b, c)) return true;
         }
 
-        // 3. Fallback to direct HIP driver if installed
-        if (EnsureAmdInitialized())
-        {
-            try
-            {
-                GemmKernels.MatMul(a, b, c);
-                HipDriver.DeviceSynchronize();
-                return true;
-            }
-            catch { }
-        }
-
+        // 3. Fail explicitly if no genuine GPU execution path is available.
+        // We strictly DO NOT fall back to CPU while claiming AMD GPU acceleration.
         return false;
     }
 
