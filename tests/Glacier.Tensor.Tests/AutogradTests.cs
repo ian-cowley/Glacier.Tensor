@@ -89,4 +89,113 @@ public class AutogradTests
         Assert.Equal(1.0f, x.Grad[2]);
         Assert.Equal(1.0f, x.Grad[3]);
     }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(7)]
+    [InlineData(8)]
+    [InlineData(15)]
+    [InlineData(16)]
+    [InlineData(24)]
+    [InlineData(31)]
+    [InlineData(1000)]
+    public void Autograd_GradientAccumulation_Vectorized_EqualLength(int n)
+    {
+        using var tape = new AutogradTape();
+        using var x = new Tensor<float>(n);
+        using var w = new Tensor<float>(n);
+
+        for (int i = 0; i < n; i++)
+        {
+            x[i] = i + 1.0f;
+            w[i] = (i + 1.0f) * 2.0f;
+        }
+
+        tape.Watch(x);
+        tape.Watch(w);
+
+        // y = x + w
+        using var y = TensorOps.Add(x, w);
+        tape.Backward(y);
+
+        Assert.NotNull(x.Grad);
+        Assert.NotNull(w.Grad);
+        Assert.Equal(n, x.Grad.ElementCount);
+        Assert.Equal(n, w.Grad.ElementCount);
+
+        for (int i = 0; i < n; i++)
+        {
+            Assert.Equal(1.0f, x.Grad[i]);
+            Assert.Equal(1.0f, w.Grad[i]);
+        }
+    }
+
+    [Theory]
+    [InlineData(5, 17)]
+    [InlineData(32, 64)]
+    [InlineData(3, 8)]
+    public void Autograd_GradientAccumulation_Vectorized_BroadcastReduction(int batch, int d)
+    {
+        using var tape = new AutogradTape();
+        using var x = new Tensor<float>(batch, d);
+        using var bias = new Tensor<float>(d);
+
+        for (int b = 0; b < batch; b++)
+        {
+            for (int j = 0; j < d; j++)
+            {
+                x[b, j] = (b + 1) * 10.0f + j;
+            }
+        }
+        for (int j = 0; j < d; j++)
+        {
+            bias[j] = j * 0.5f;
+        }
+
+        tape.Watch(bias);
+
+        // Record a manual tape entry for broadcast add to test broadcast reduction in backward pass
+        using var y = new Tensor<float>(batch, d);
+        for (int b = 0; b < batch; b++)
+        {
+            for (int j = 0; j < d; j++)
+            {
+                y[b, j] = x[b, j] + bias[j];
+            }
+        }
+        y.RequiresGrad = true;
+        tape.Record(new TapeEntry(AutogradOp.Add, y, x, bias));
+
+        tape.Backward(y);
+
+        Assert.NotNull(bias.Grad);
+        Assert.Equal(d, bias.Grad.ElementCount);
+
+        // In y = x + bias, dLoss/dbias_j = sum_{b=0}^{batch-1} dLoss/dy_{b,j} = batch * 1.0f
+        for (int j = 0; j < d; j++)
+        {
+            Assert.Equal((float)batch, bias.Grad[j]);
+        }
+    }
+
+    [Fact]
+    public void Autograd_MultipleBackward_AccumulatesGradientsCorrectly()
+    {
+        using var tape = new AutogradTape();
+        int n = 48; // spans across Vector512, Vector256, Vector128
+        using var x = new Tensor<float>(n);
+        for (int i = 0; i < n; i++) x[i] = (float)i;
+
+        tape.Watch(x);
+
+        // y = x + x -> dy/dx = 2.0
+        using var y = TensorOps.Add(x, x);
+        tape.Backward(y);
+
+        Assert.NotNull(x.Grad);
+        for (int i = 0; i < n; i++)
+        {
+            Assert.Equal(2.0f, x.Grad[i]);
+        }
+    }
 }

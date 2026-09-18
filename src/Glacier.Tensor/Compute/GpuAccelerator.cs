@@ -30,14 +30,6 @@ public static unsafe class GpuAccelerator
     private static IntPtr s_cuTensorCoreFp32Fn;
     private static IntPtr s_cuTensorCoreFp16Fn;
 
-    // High-performance reusable device memory pool (eliminates OS driver allocator overhead)
-    private static IntPtr s_pooledDevA;
-    private static IntPtr s_pooledDevB;
-    private static IntPtr s_pooledDevC;
-    private static nuint s_pooledCapA;
-    private static nuint s_pooledCapB;
-    private static nuint s_pooledCapC;
-
     private static bool s_amdInitialized;
     private static bool s_amdAvailable;
 
@@ -334,9 +326,15 @@ public static unsafe class GpuAccelerator
 
         CuDriver.CtxSetCurrent(s_cuContext);
 
-        IntPtr d_a = IntPtr.Zero;
-        IntPtr d_b = IntPtr.Zero;
-        IntPtr d_c = IntPtr.Zero;
+        CudaExecutionContext ctx;
+        try
+        {
+            ctx = CudaExecutionContext.Rent();
+        }
+        catch
+        {
+            return false;
+        }
 
         try
         {
@@ -361,78 +359,64 @@ public static unsafe class GpuAccelerator
                     s_cuGemmFn,
                     gX, gY, 1,
                     16, 16, 1,
-                    0, IntPtr.Zero,
+                    0, ctx.Stream,
                     (IntPtr)kParams,
                     IntPtr.Zero
                 );
 
                 if (lRes != 0) return false;
-                CuDriver.CtxSynchronize();
+                CuDriver.StreamSynchronize(ctx.Stream);
                 return true;
             }
 
-            lock (s_initLock)
+            ctx.EnsureCapacityA(bytesA);
+            ctx.EnsureCapacityB(bytesB);
+            ctx.EnsureCapacityC(bytesC);
+
+            IntPtr d_a = ctx.DevA;
+            IntPtr d_b = ctx.DevB;
+            IntPtr d_c = ctx.DevC;
+
+            fixed (float* pA = a.AsSpan(), pB = b.AsSpan(), pC = c.AsSpan())
             {
-                if (bytesA > s_pooledCapA)
-                {
-                    if (s_pooledDevA != IntPtr.Zero) CuDriver.MemFree(s_pooledDevA);
-                    if (CuDriver.MemAlloc(out s_pooledDevA, bytesA) != 0) return false;
-                    s_pooledCapA = bytesA;
-                }
-                if (bytesB > s_pooledCapB)
-                {
-                    if (s_pooledDevB != IntPtr.Zero) CuDriver.MemFree(s_pooledDevB);
-                    if (CuDriver.MemAlloc(out s_pooledDevB, bytesB) != 0) return false;
-                    s_pooledCapB = bytesB;
-                }
-                if (bytesC > s_pooledCapC)
-                {
-                    if (s_pooledDevC != IntPtr.Zero) CuDriver.MemFree(s_pooledDevC);
-                    if (CuDriver.MemAlloc(out s_pooledDevC, bytesC) != 0) return false;
-                    s_pooledCapC = bytesC;
-                }
+                CuDriver.MemcpyHtoDAsync(d_a, (IntPtr)pA, bytesA, ctx.Stream);
+                CuDriver.MemcpyHtoDAsync(d_b, (IntPtr)pB, bytesB, ctx.Stream);
 
-                d_a = s_pooledDevA;
-                d_b = s_pooledDevB;
-                d_c = s_pooledDevC;
+                void** kernelParams = stackalloc void*[6];
+                kernelParams[0] = &d_a;
+                kernelParams[1] = &d_b;
+                kernelParams[2] = &d_c;
+                kernelParams[3] = &M;
+                kernelParams[4] = &N;
+                kernelParams[5] = &K;
 
-                fixed (float* pA = a.AsSpan(), pB = b.AsSpan(), pC = c.AsSpan())
-                {
-                    CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bytesA);
-                    CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bytesB);
+                // Fast GEMM computes a 64x64 block per CTA using 256 threads (16x16)
+                uint gridX = (uint)((N + 63) / 64);
+                uint gridY = (uint)((M + 63) / 64);
 
-                    void** kernelParams = stackalloc void*[6];
-                    kernelParams[0] = &d_a;
-                    kernelParams[1] = &d_b;
-                    kernelParams[2] = &d_c;
-                    kernelParams[3] = &M;
-                    kernelParams[4] = &N;
-                    kernelParams[5] = &K;
+                int launchRes = CuDriver.LaunchKernel(
+                    s_cuGemmFn,
+                    gridX, gridY, 1,
+                    16, 16, 1,
+                    0, ctx.Stream,
+                    (IntPtr)kernelParams,
+                    IntPtr.Zero
+                );
 
-                    // Fast GEMM computes a 64x64 block per CTA using 256 threads (16x16)
-                    uint gridX = (uint)((N + 63) / 64);
-                    uint gridY = (uint)((M + 63) / 64);
+                if (launchRes != 0) return false;
 
-                    int launchRes = CuDriver.LaunchKernel(
-                        s_cuGemmFn,
-                        gridX, gridY, 1,
-                        16, 16, 1,
-                        0, IntPtr.Zero,
-                        (IntPtr)kernelParams,
-                        IntPtr.Zero
-                    );
-
-                    if (launchRes != 0) return false;
-
-                    CuDriver.CtxSynchronize();
-                    CuDriver.MemcpyDtoH((IntPtr)pC, d_c, bytesC);
-                    return true;
-                }
+                CuDriver.MemcpyDtoHAsync((IntPtr)pC, d_c, bytesC, ctx.Stream);
+                CuDriver.StreamSynchronize(ctx.Stream);
+                return true;
             }
         }
         catch
         {
             return false;
+        }
+        finally
+        {
+            CudaExecutionContext.Return(ctx);
         }
     }
 
@@ -454,9 +438,15 @@ public static unsafe class GpuAccelerator
 
         CuDriver.CtxSetCurrent(s_cuContext);
 
-        IntPtr d_a = IntPtr.Zero;
-        IntPtr d_b = IntPtr.Zero;
-        IntPtr d_c = IntPtr.Zero;
+        CudaExecutionContext ctx;
+        try
+        {
+            ctx = CudaExecutionContext.Rent();
+        }
+        catch
+        {
+            return false;
+        }
 
         try
         {
@@ -481,78 +471,64 @@ public static unsafe class GpuAccelerator
                     s_cuTensorCoreFp32Fn,
                     gX, gY, 1,
                     32, 1, 1,
-                    0, IntPtr.Zero,
+                    0, ctx.Stream,
                     (IntPtr)kParams,
                     IntPtr.Zero
                 );
 
                 if (lRes != 0) return false;
-                CuDriver.CtxSynchronize();
+                CuDriver.StreamSynchronize(ctx.Stream);
                 return true;
             }
 
-            lock (s_initLock)
+            ctx.EnsureCapacityA(bytesA);
+            ctx.EnsureCapacityB(bytesB);
+            ctx.EnsureCapacityC(bytesC);
+
+            IntPtr d_a = ctx.DevA;
+            IntPtr d_b = ctx.DevB;
+            IntPtr d_c = ctx.DevC;
+
+            fixed (float* pA = a.AsSpan(), pB = b.AsSpan(), pC = c.AsSpan())
             {
-                if (bytesA > s_pooledCapA)
-                {
-                    if (s_pooledDevA != IntPtr.Zero) CuDriver.MemFree(s_pooledDevA);
-                    if (CuDriver.MemAlloc(out s_pooledDevA, bytesA) != 0) return false;
-                    s_pooledCapA = bytesA;
-                }
-                if (bytesB > s_pooledCapB)
-                {
-                    if (s_pooledDevB != IntPtr.Zero) CuDriver.MemFree(s_pooledDevB);
-                    if (CuDriver.MemAlloc(out s_pooledDevB, bytesB) != 0) return false;
-                    s_pooledCapB = bytesB;
-                }
-                if (bytesC > s_pooledCapC)
-                {
-                    if (s_pooledDevC != IntPtr.Zero) CuDriver.MemFree(s_pooledDevC);
-                    if (CuDriver.MemAlloc(out s_pooledDevC, bytesC) != 0) return false;
-                    s_pooledCapC = bytesC;
-                }
+                CuDriver.MemcpyHtoDAsync(d_a, (IntPtr)pA, bytesA, ctx.Stream);
+                CuDriver.MemcpyHtoDAsync(d_b, (IntPtr)pB, bytesB, ctx.Stream);
 
-                d_a = s_pooledDevA;
-                d_b = s_pooledDevB;
-                d_c = s_pooledDevC;
+                void** kernelParams = stackalloc void*[6];
+                kernelParams[0] = &d_a;
+                kernelParams[1] = &d_b;
+                kernelParams[2] = &d_c;
+                kernelParams[3] = &M;
+                kernelParams[4] = &N;
+                kernelParams[5] = &K;
 
-                fixed (float* pA = a.AsSpan(), pB = b.AsSpan(), pC = c.AsSpan())
-                {
-                    CuDriver.MemcpyHtoD(d_a, (IntPtr)pA, bytesA);
-                    CuDriver.MemcpyHtoD(d_b, (IntPtr)pB, bytesB);
+                // Tensor Core kernel computes a 16x16 block per warp (32 threads)
+                uint gridX = (uint)((M + 15) / 16);
+                uint gridY = (uint)((N + 15) / 16);
 
-                    void** kernelParams = stackalloc void*[6];
-                    kernelParams[0] = &d_a;
-                    kernelParams[1] = &d_b;
-                    kernelParams[2] = &d_c;
-                    kernelParams[3] = &M;
-                    kernelParams[4] = &N;
-                    kernelParams[5] = &K;
+                int launchRes = CuDriver.LaunchKernel(
+                    s_cuTensorCoreFp32Fn,
+                    gridX, gridY, 1,
+                    32, 1, 1,
+                    0, ctx.Stream,
+                    (IntPtr)kernelParams,
+                    IntPtr.Zero
+                );
 
-                    // Tensor Core kernel computes a 16x16 block per warp (32 threads)
-                    uint gridX = (uint)((M + 15) / 16);
-                    uint gridY = (uint)((N + 15) / 16);
+                if (launchRes != 0) return false;
 
-                    int launchRes = CuDriver.LaunchKernel(
-                        s_cuTensorCoreFp32Fn,
-                        gridX, gridY, 1,
-                        32, 1, 1,
-                        0, IntPtr.Zero,
-                        (IntPtr)kernelParams,
-                        IntPtr.Zero
-                    );
-
-                    if (launchRes != 0) return false;
-
-                    CuDriver.CtxSynchronize();
-                    CuDriver.MemcpyDtoH((IntPtr)pC, d_c, bytesC);
-                    return true;
-                }
+                CuDriver.MemcpyDtoHAsync((IntPtr)pC, d_c, bytesC, ctx.Stream);
+                CuDriver.StreamSynchronize(ctx.Stream);
+                return true;
             }
         }
         catch
         {
             return false;
+        }
+        finally
+        {
+            CudaExecutionContext.Return(ctx);
         }
     }
 

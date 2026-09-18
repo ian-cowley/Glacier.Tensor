@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Glacier.Tensor.Compute;
 using Glacier.Tensor.Core;
 
@@ -241,10 +244,7 @@ public sealed class AutogradTape : IDisposable
 
         if (spanTarget.Length == spanDelta.Length)
         {
-            for (int i = 0; i < spanTarget.Length; i++)
-            {
-                spanTarget[i] += spanDelta[i];
-            }
+            AddInPlaceVectorized(spanTarget, spanDelta);
         }
         else if (spanDelta.Length % spanTarget.Length == 0)
         {
@@ -253,11 +253,63 @@ public sealed class AutogradTape : IDisposable
             int batch = spanDelta.Length / d;
             for (int b = 0; b < batch; b++)
             {
-                for (int i = 0; i < d; i++)
-                {
-                    spanTarget[i] += spanDelta[b * d + i];
-                }
+                AddInPlaceVectorized(spanTarget, spanDelta.Slice(b * d, d));
             }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AddInPlaceVectorized(Span<float> target, ReadOnlySpan<float> delta)
+    {
+        int n = target.Length;
+        int i = 0;
+
+        ref float rTarget = ref MemoryMarshal.GetReference(target);
+        ref float rDelta = ref MemoryMarshal.GetReference(delta);
+
+        // Stage 1: AVX-512 (16 floats per iteration)
+        if (Vector512.IsHardwareAccelerated)
+        {
+            int step512 = Vector512<float>.Count;
+            int limit512 = n - step512;
+            for (; i <= limit512; i += step512)
+            {
+                var vTarget = Vector512.LoadUnsafe(ref rTarget, (nuint)i);
+                var vDelta = Vector512.LoadUnsafe(ref rDelta, (nuint)i);
+                (vTarget + vDelta).StoreUnsafe(ref rTarget, (nuint)i);
+            }
+        }
+
+        // Stage 2: AVX2 (8 floats per iteration)
+        if (Vector256.IsHardwareAccelerated)
+        {
+            int step256 = Vector256<float>.Count;
+            int limit256 = n - step256;
+            for (; i <= limit256; i += step256)
+            {
+                var vTarget = Vector256.LoadUnsafe(ref rTarget, (nuint)i);
+                var vDelta = Vector256.LoadUnsafe(ref rDelta, (nuint)i);
+                (vTarget + vDelta).StoreUnsafe(ref rTarget, (nuint)i);
+            }
+        }
+
+        // Stage 3: ARM Neon / SSE2 (4 floats per iteration)
+        if (Vector128.IsHardwareAccelerated)
+        {
+            int step128 = Vector128<float>.Count;
+            int limit128 = n - step128;
+            for (; i <= limit128; i += step128)
+            {
+                var vTarget = Vector128.LoadUnsafe(ref rTarget, (nuint)i);
+                var vDelta = Vector128.LoadUnsafe(ref rDelta, (nuint)i);
+                (vTarget + vDelta).StoreUnsafe(ref rTarget, (nuint)i);
+            }
+        }
+
+        // Stage 4: Scalar tail cleanup (0 to 3 floats)
+        for (; i < n; i++)
+        {
+            target[i] += delta[i];
         }
     }
 

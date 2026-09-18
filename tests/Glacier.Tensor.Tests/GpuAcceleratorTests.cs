@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using Glacier.Tensor.Compute;
 using Glacier.Tensor.Core;
 using Xunit;
@@ -149,6 +150,62 @@ public class GpuAcceleratorTests
 
         // Half precision Tensor Core inputs have ~1e-2 tolerance due to 11-bit mantissa conversion
         VerifyAgainstGroundTruth(a, b, c, M, K, N, tolerance: 0.05f);
+    }
+
+    [Fact]
+    public async Task MatMul_ConcurrentThreads_ExecutesWithoutDeadlockOrCorruption()
+    {
+        const int numTasks = 8;
+        var tasks = new Task[numTasks];
+
+        for (int t = 0; t < numTasks; t++)
+        {
+            int seed = 1000 + t * 10;
+            tasks[t] = Task.Run(() =>
+            {
+                int M = 64, K = 64, N = 64;
+                using var a = TensorFloatExtensions.RandomUniform([M, K], -1f, 1f, seed: seed);
+                using var b = TensorFloatExtensions.RandomUniform([K, N], -1f, 1f, seed: seed + 1);
+                using var c = new Tensor<float>(M, N);
+
+                a.MatMul(b, c, GpuTarget.Auto);
+
+                VerifyAgainstGroundTruth(a, b, c, M, K, N, tolerance: 1e-3f);
+            });
+        }
+
+        await Task.WhenAll(tasks);
+    }
+
+    [Fact]
+    public async Task MatMul_NvidiaConcurrentThreads_IfHardwareAvailable_ExecutesConcurrently()
+    {
+        if (!GpuAccelerator.HasNvidiaGpu)
+        {
+            return;
+        }
+
+        const int numTasks = 8;
+        var tasks = new Task[numTasks];
+
+        for (int t = 0; t < numTasks; t++)
+        {
+            int seed = 2000 + t * 10;
+            tasks[t] = Task.Run(() =>
+            {
+                int M = 128, K = 128, N = 128;
+                using var a = TensorFloatExtensions.RandomUniform([M, K], -1f, 1f, seed: seed);
+                using var b = TensorFloatExtensions.RandomUniform([K, N], -1f, 1f, seed: seed + 1);
+                using var c = new Tensor<float>(M, N);
+
+                bool success = GpuAccelerator.ExecuteNvidiaGemm(a, b, c);
+                Assert.True(success);
+
+                VerifyAgainstGroundTruth(a, b, c, M, K, N, tolerance: 1e-3f);
+            });
+        }
+
+        await Task.WhenAll(tasks);
     }
 
     private static void VerifyAgainstGroundTruth(Tensor<float> a, Tensor<float> b, Tensor<float> c, int M, int K, int N, float tolerance = 1e-4f)

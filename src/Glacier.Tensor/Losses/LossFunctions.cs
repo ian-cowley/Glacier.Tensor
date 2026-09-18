@@ -211,4 +211,192 @@ public static class LossFunctions
             }
         }
     }
+
+    /// <summary>
+    /// Computes multi-class categorical cross-entropy loss with optional label smoothing.
+    /// Smooths one-hot labels with uniform prior: y'_k = (1 - alpha) * y_k + alpha / K.
+    /// </summary>
+    public static (float lossValue, Tensor<float> lossTensor) CategoricalCrossEntropyLoss(
+        Tensor<float> logits,
+        Tensor<float> targets,
+        float labelSmoothing = 0.0f)
+    {
+        int batch = logits.Shape.Rank > 1 ? logits.Shape[0] : 1;
+        int classes = logits.Shape.Rank > 1 ? logits.Shape[1] : logits.Shape[0];
+
+        if (batch <= 0 || classes <= 0)
+            throw new ArgumentException("Invalid logits tensor dimensions.");
+
+        var logSpan = logits.AsSpan();
+        var tgtSpan = targets.AsSpan();
+        bool isOneHot = targets.ElementCount == (long)batch * classes;
+        float totalLoss = 0f;
+        float smoothVal = labelSmoothing / classes;
+
+        for (int b = 0; b < batch; b++)
+        {
+            int offset = b * classes;
+
+            float maxLogit = logSpan[offset];
+            for (int c = 1; c < classes; c++)
+            {
+                if (logSpan[offset + c] > maxLogit)
+                    maxLogit = logSpan[offset + c];
+            }
+
+            float sumExp = 0f;
+            for (int c = 0; c < classes; c++)
+            {
+                sumExp += MathF.Exp(logSpan[offset + c] - maxLogit);
+            }
+            float logSumExp = maxLogit + MathF.Log(sumExp);
+
+            int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
+            for (int c = 0; c < classes; c++)
+            {
+                float y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0f : 0.0f);
+                float smoothedY = (1.0f - labelSmoothing) * y + smoothVal;
+                totalLoss += smoothedY * (logSumExp - logSpan[offset + c]);
+            }
+        }
+
+        totalLoss /= batch;
+        var lossTensor = new Tensor<float>(1);
+        lossTensor.AsSpan()[0] = totalLoss;
+
+        if (AutogradTape.Current != null)
+        {
+            if (logits.Grad == null)
+                logits.Grad = Tensor<float>.Zeros(logits.Shape);
+
+            var outSpan = logits.Grad.AsSpan();
+            float scale = 1.0f / batch;
+
+            for (int b = 0; b < batch; b++)
+            {
+                int offset = b * classes;
+                float maxLogit = logSpan[offset];
+                for (int c = 1; c < classes; c++)
+                {
+                    if (logSpan[offset + c] > maxLogit) maxLogit = logSpan[offset + c];
+                }
+
+                float sumExp = 0f;
+                for (int c = 0; c < classes; c++) sumExp += MathF.Exp(logSpan[offset + c] - maxLogit);
+
+                int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
+                for (int c = 0; c < classes; c++)
+                {
+                    float p = MathF.Exp(logSpan[offset + c] - maxLogit) / sumExp;
+                    float y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0f : 0.0f);
+                    float smoothedY = (1.0f - labelSmoothing) * y + smoothVal;
+                    outSpan[offset + c] += scale * (p - smoothedY);
+                }
+            }
+        }
+
+        return (totalLoss, lossTensor);
+    }
+
+    /// <summary>
+    /// Computes Brier Score Loss (mean squared error of predicted probabilities against ground truth).
+    /// Strictly proper scoring rule used for policy probability calibration.
+    /// </summary>
+    public static (float lossValue, Tensor<float> lossTensor) BrierScoreLoss(
+        Tensor<float> logits,
+        Tensor<float> targets)
+    {
+        int batch = logits.Shape.Rank > 1 ? logits.Shape[0] : 1;
+        int classes = logits.Shape.Rank > 1 ? logits.Shape[1] : logits.Shape[0];
+
+        var logSpan = logits.AsSpan();
+        var tgtSpan = targets.AsSpan();
+        bool isOneHot = targets.ElementCount == (long)batch * classes;
+        float totalLoss = 0f;
+
+        Span<float> probs = stackalloc float[Math.Min(classes, 256)];
+        bool useHeap = classes > 256;
+        float[]? heapArr = useHeap ? new float[classes] : null;
+        Span<float> pSpan = useHeap ? heapArr.AsSpan() : probs;
+
+        for (int b = 0; b < batch; b++)
+        {
+            int offset = b * classes;
+
+            float maxLogit = logSpan[offset];
+            for (int c = 1; c < classes; c++)
+            {
+                if (logSpan[offset + c] > maxLogit) maxLogit = logSpan[offset + c];
+            }
+
+            float sumExp = 0f;
+            for (int c = 0; c < classes; c++)
+            {
+                pSpan[c] = MathF.Exp(logSpan[offset + c] - maxLogit);
+                sumExp += pSpan[c];
+            }
+
+            float invSum = 1.0f / sumExp;
+            int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
+            for (int c = 0; c < classes; c++)
+            {
+                pSpan[c] *= invSum;
+                float y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0f : 0.0f);
+                float diff = pSpan[c] - y;
+                totalLoss += diff * diff;
+            }
+        }
+
+        totalLoss /= batch;
+        var lossTensor = new Tensor<float>(1);
+        lossTensor.AsSpan()[0] = totalLoss;
+
+        return (totalLoss, lossTensor);
+    }
+
+    /// <summary>
+    /// Computes Expected Calibration Error (ECE) across M confidence bins.
+    /// Measures the gap between predicted confidence and empirical accuracy.
+    /// </summary>
+    public static float ExpectedCalibrationError(
+        ReadOnlySpan<float> confidences,
+        ReadOnlySpan<int> predictions,
+        ReadOnlySpan<int> groundTruth,
+        int numBins = 10)
+    {
+        if (confidences.Length != predictions.Length || confidences.Length != groundTruth.Length)
+            throw new ArgumentException("Input spans must have the same length.");
+
+        int n = confidences.Length;
+        if (n == 0) return 0f;
+
+        Span<int> binCounts = stackalloc int[numBins];
+        Span<float> binAccuracies = stackalloc float[numBins];
+        Span<float> binConfidences = stackalloc float[numBins];
+
+        for (int i = 0; i < n; i++)
+        {
+            float conf = Math.Clamp(confidences[i], 0f, 1f);
+            int bin = Math.Min((int)(conf * numBins), numBins - 1);
+            binCounts[bin]++;
+            binConfidences[bin] += conf;
+            if (predictions[i] == groundTruth[i])
+            {
+                binAccuracies[bin] += 1.0f;
+            }
+        }
+
+        float ece = 0f;
+        for (int b = 0; b < numBins; b++)
+        {
+            if (binCounts[b] > 0)
+            {
+                float avgAcc = binAccuracies[b] / binCounts[b];
+                float avgConf = binConfidences[b] / binCounts[b];
+                ece += (float)binCounts[b] / n * MathF.Abs(avgAcc - avgConf);
+            }
+        }
+
+        return ece;
+    }
 }
