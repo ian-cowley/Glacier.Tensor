@@ -195,6 +195,15 @@ using var mergedModel = lora.Merge();
 
 ---
 
+## 🆕 What's New in v1.0.7
+
+- **`CudaExecutionContext` pool** — replaces the previous global `s_initLock` mutex, enabling lock-free concurrent GPU context acquisition.
+- **SIMD-vectorised autograd tape gradient accumulation** — `Vector256<float>` fused multiply-add (FMA) accumulates gradients directly into unmanaged parameter buffers.
+- **Zero per-operation heap allocation in backward pass** — the entire reverse-mode tape executes without touching the managed heap.
+- **111 tests** passing (100 %).
+
+---
+
 ## Credits
 
 Developed by Ian Cowley and Antigravity (Google DeepMind).
