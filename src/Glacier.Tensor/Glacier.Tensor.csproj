@@ -12,15 +12,15 @@
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Tensor</PackageId>
-    <Version>1.0.7</Version>
+    <Version>1.0.8</Version>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
-    <Description>Pure C# N-dimensional strided tensor engine and zero-allocation autograd framework for .NET 10. Native alternative to TensorFlow and PyTorch with cache-blocked AVX-512 GEMM, Polaris DataFrame zero-copy ingestion, and bare-metal Glacier.Gpu acceleration.</Description>
+    <Description>Pure C# N-dimensional strided tensor engine and zero-allocation autograd framework for .NET 10. Native alternative to TensorFlow and PyTorch with cache-blocked AVX-512 GEMM, Glacier.Compute distributed ring AllReduce (NCCL alternative), and Polaris DataFrame zero-copy ingestion.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/ian-cowley/Glacier.Tensor</PackageProjectUrl>
     <RepositoryUrl>https://github.com/ian-cowley/Glacier.Tensor.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>tensor;autograd;deep-learning;pytorch;tensorflow;gemm;simd;avx512;gpu;high-performance;net10;glacier</PackageTags>
+    <PackageTags>tensor;autograd;deep-learning;pytorch;tensorflow;gemm;simd;avx512;compute;allreduce;nccl;gpu;high-performance;net10;glacier</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
@@ -29,9 +29,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Glacier.Compute" Version="1.0.0" />
     <PackageReference Include="Glacier.Polaris" Version="1.0.17" />
-    <ProjectReference Include="..\..\..\Glacier.Gpu\src\Glacier.Gpu\Glacier.Gpu.csproj" Condition="Exists('..\..\..\Glacier.Gpu\src\Glacier.Gpu\Glacier.Gpu.csproj')" />
-    <PackageReference Include="Glacier.Gpu" Version="1.0.7" Condition="!Exists('..\..\..\Glacier.Gpu\src\Glacier.Gpu\Glacier.Gpu.csproj')" />
+    <PackageReference Include="Glacier.Gpu" Version="1.0.7" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
   </ItemGroup>
