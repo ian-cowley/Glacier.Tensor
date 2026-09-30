@@ -57,7 +57,7 @@ Deep learning in Python is dominated by **TensorFlow** and **PyTorch**. While th
          ▼                         ▼                         ▼                         ▼
  [ NvidiaTensorCore ]     [ Direct3D 12 Compute ]    [ Vulkan 1.3 Compute ]    [ Multi-Core CPU ]
   Ada Lovelace WMMA        AMD Radeon 890M APU        Universal Cross-Vendor    AVX-512 Blocked
-  1.33 TFLOPS (1.6 ms)     469 GFLOPS (4.5 ms)        SPIR-V Tiled Kernel       Dynamic Scaling
+  4.72 TFLOPS (0.46 ms)    1.10 TFLOPS (1.95 ms)      SPIR-V Tiled Kernel       Dynamic Scaling
 ```
 
 - **In-Place Gradient Accumulation**: Gradients write directly to unmanaged parameter buffers without allocating intermediary gradient tensor wrapper objects.
@@ -69,10 +69,12 @@ Deep learning in Python is dominated by **TensorFlow** and **PyTorch**. While th
 
 *Benchmarked on .NET 10.0: AMD Ryzen AI 9 HX 370 (Zen 5 AVX-512) + AMD Radeon 890M APU vs. NVIDIA GeForce RTX 4060 Laptop GPU (Ada Lovelace sm_89)*
 
-| Deep Learning Task | Workload Scope | PyTorch CPU (v2.x) | Glacier.Tensor (CPU AVX-512) | Glacier.Tensor (Radeon 890M D3D12) | Glacier.Tensor (RTX 4060 WMMA) | Speedup vs PyTorch |
+| Deep Learning Task | Workload Scope | PyTorch CPU (v2.x) | Glacier.Tensor (CPU AVX-512) | Glacier.Tensor (Radeon 890M D3D12) | Glacier.Tensor (RTX 4060 Resident) | Speedup vs PyTorch |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **GEMM Matrix Multiply** | $512 \times 512$ FP32 | 12 ms | 0.89 ms | **0.69 ms** | **0.45 ms (0.59 TFLOPS)** | **26.7x** |
-| **GEMM Matrix Multiply** | $1024 \times 1024$ FP32 | 48 ms | 6.01 ms | **4.58 ms (0.47 TFLOPS)** | **1.61 ms (1.33 TFLOPS)** | **29.8x** |
+| **GEMM Matrix Multiply** | $512 \times 512$ FP32 | 12 ms | **0.88 ms** | **0.69 ms** | **0.22 ms (1.22 TFLOPS)** | **54.5x** |
+| **GEMM Matrix Multiply** | $1024 \times 1024$ FP32 | 48 ms | **4.34 ms (0.50 TFLOPS)** | **1.95 ms (1.10 TFLOPS)** | **0.46 ms (4.72 TFLOPS)** | **104.3x** |
+| **GEMM Matrix Multiply** | $2048 \times 2048$ FP32 | ~380 ms | **34.2 ms (0.50 TFLOPS)** | **12.31 ms (1.40 TFLOPS)**| **3.28 ms (5.23 TFLOPS)** | **115.8x** |
+| **Qwen 2.5 7B LoRA (q_proj)** | $512 \times 3584$ ($r=16$) | ~340 ms | **32.7 ms (15,679 tok/s)** | — | **14.2 ms (36,056 tok/s)** | **23.9x** |
 | **ResNet-50 Forward Pass** | Batch size 1 (Inference) | 28 ms | 16.0 ms | **5.40 ms** | **2.80 ms** | **10.0x** |
 | **MLP Backward Pass** | 100k samples, 3 layers | 180 ms | 92.0 ms | **31.2 ms** | **18.5 ms** | **9.7x** |
 | **Distribution Package Size** | Self-contained binary | ~4.2 GB | **< 28 MB** | **< 28 MB** | **< 28 MB** | **> 150x smaller (Native AOT)** |
