@@ -137,4 +137,104 @@ public class PolarisInteropTests
             Assert.Equal((float)(r * 4L), tensor[r, 3]);
         }
     }
+
+    [Fact]
+    public void Series_AsTensorView_ZeroCopy_ModificationsReflectImmediately()
+    {
+        int length = 100;
+        var series = new Float32Series("s_f32", length);
+        for (int i = 0; i < length; i++)
+        {
+            series.Memory.Span[i] = i * 1.5f;
+        }
+
+        using var tensor = series.AsTensorView();
+
+        Assert.Equal(1, tensor.Rank);
+        Assert.Equal(length, tensor.ElementCount);
+        Assert.True(tensor.IsContiguous);
+
+        // Verify initial contents
+        for (int i = 0; i < length; i++)
+        {
+            Assert.Equal(i * 1.5f, tensor[i]);
+        }
+
+        // Zero-copy assertion: mutating series memory reflects in tensor
+        series.Memory.Span[5] = 42.5f;
+        Assert.Equal(42.5f, tensor[5]);
+
+        // Zero-copy assertion: mutating tensor reflects in series memory
+        tensor[10] = 99.25f;
+        Assert.Equal(99.25f, series.Memory.Span[10]);
+    }
+
+    [Fact]
+    public void Series_AsTensorView_2DColumnVector_ZeroCopy()
+    {
+        int length = 50;
+        var series = new Float32Series("s_col", length);
+        for (int i = 0; i < length; i++)
+        {
+            series.Memory.Span[i] = i * 2.0f;
+        }
+
+        using var tensor = series.AsTensorView(as2DColumn: true);
+
+        Assert.Equal(2, tensor.Rank);
+        Assert.Equal(length, tensor.Shape[0]);
+        Assert.Equal(1, tensor.Shape[1]);
+
+        series.Memory.Span[7] = 777.0f;
+        Assert.Equal(777.0f, tensor[7, 0]);
+
+        tensor[12, 0] = 888.0f;
+        Assert.Equal(888.0f, series.Memory.Span[12]);
+    }
+
+    [Fact]
+    public void DataFrame_ToTensorView_SingleColumn_ZeroCopy()
+    {
+        int rows = 40;
+        var colA = new Float32Series("col_a", rows);
+        for (int i = 0; i < rows; i++)
+        {
+            colA.Memory.Span[i] = i * 3.0f;
+        }
+
+        var df = new DataFrame(new ISeries[] { colA });
+        using var tensor = df.ToTensorView("col_a");
+
+        Assert.Equal(2, tensor.Rank);
+        Assert.Equal(rows, tensor.Shape[0]);
+        Assert.Equal(1, tensor.Shape[1]);
+
+        colA.Memory.Span[3] = 123.4f;
+        Assert.Equal(123.4f, tensor[3, 0]);
+
+        tensor[4, 0] = 567.8f;
+        Assert.Equal(567.8f, colA.Memory.Span[4]);
+    }
+
+    [Fact]
+    public void Series_AsTensorView_Int32_ZeroCopy()
+    {
+        int length = 30;
+        var series = new Int32Series("s_i32", length);
+        for (int i = 0; i < length; i++)
+        {
+            series.Memory.Span[i] = i * 10;
+        }
+
+        using var tensor = series.AsTensorView();
+
+        Assert.Equal(1, tensor.Rank);
+        Assert.Equal(length, tensor.ElementCount);
+
+        series.Memory.Span[0] = 12345;
+        Assert.Equal(12345, tensor[0]);
+
+        tensor[1] = 54321;
+        Assert.Equal(54321, series.Memory.Span[1]);
+    }
 }

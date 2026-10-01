@@ -15,6 +15,7 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
     private readonly long _elementCount;
     private readonly nuint _byteLength;
     private readonly bool _ownsMemory;
+    private readonly IDisposable? _lifetimeOwner;
     private int _refCount;
     private bool _disposed;
 
@@ -31,6 +32,7 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
         _elementCount = elementCount;
         _byteLength = (nuint)(elementCount * sizeof(T));
         _ownsMemory = true;
+        _lifetimeOwner = null;
         _refCount = 1;
 
         if (_byteLength > 0)
@@ -47,12 +49,13 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
         }
     }
 
-    public NativeMemoryBlock(T* externalPointer, long elementCount, bool ownsMemory = false)
+    public NativeMemoryBlock(T* externalPointer, long elementCount, bool ownsMemory = false, IDisposable? lifetimeOwner = null)
     {
         _pointer = externalPointer;
         _elementCount = elementCount;
         _byteLength = (nuint)(elementCount * sizeof(T));
         _ownsMemory = ownsMemory;
+        _lifetimeOwner = lifetimeOwner;
         _refCount = 1;
     }
 
@@ -83,6 +86,7 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
                     NativeMemory.AlignedFree(_pointer);
                     _pointer = null;
                 }
+                _lifetimeOwner?.Dispose();
             }
         }
     }

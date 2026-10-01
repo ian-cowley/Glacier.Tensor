@@ -248,4 +248,99 @@ public static unsafe class PolarisExtensions
         contig.AsSpan().CopyTo(series.Memory.Span);
         return series;
     }
+
+    private sealed class MemoryHandleOwner : IDisposable
+    {
+        private MemoryHandle _handle;
+        private int _disposed;
+
+        public MemoryHandleOwner(MemoryHandle handle)
+        {
+            _handle = handle;
+        }
+
+        public void Dispose()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                _handle.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Creates a zero-copy 1D strided Tensor view directly over a Polaris Series columnar memory buffer.
+    /// </summary>
+    public static Tensor<T> AsTensorView<T>(this Series<T> series) where T : unmanaged
+    {
+        return AsTensorView(series, as2DColumn: false);
+    }
+
+    /// <summary>
+    /// Creates a zero-copy strided Tensor view directly over a Polaris Series columnar memory buffer,
+    /// optionally with 2D column vector shape [Length, 1].
+    /// </summary>
+    public static Tensor<T> AsTensorView<T>(this Series<T> series, bool as2DColumn) where T : unmanaged
+    {
+        if (series == null) throw new ArgumentNullException(nameof(series));
+
+        int len = series.Length;
+        if (len == 0)
+        {
+            return as2DColumn ? Tensor<T>.Zeros(0, 1) : Tensor<T>.Zeros(0);
+        }
+
+        var handle = series.Memory.Pin();
+        var owner = new MemoryHandleOwner(handle);
+        var block = new NativeMemoryBlock<T>((T*)handle.Pointer, len, ownsMemory: false, lifetimeOwner: owner);
+        var shape = as2DColumn ? Shape8.Create(len, 1) : Shape8.Create(len);
+        var strides = as2DColumn ? Shape8.Create(1, 1) : Shape8.Create(1);
+        return new Tensor<T>(block, shape, strides, elementOffset: 0);
+    }
+
+    /// <summary>
+    /// Creates a zero-copy Tensor view for a single column, or projects selected columns into a Tensor.
+    /// When a single column is requested, wraps the Series memory in NativeMemoryBlock and Tensor without data copies.
+    /// </summary>
+    public static Tensor<float> ToTensorView(this DataFrame df, string columnName)
+    {
+        if (df == null) throw new ArgumentNullException(nameof(df));
+        if (string.IsNullOrWhiteSpace(columnName))
+            throw new ArgumentException("Column name must be specified.", nameof(columnName));
+
+        var series = df.Columns.FirstOrDefault(x => x.Name.Equals(columnName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new ArgumentException($"Column '{columnName}' not found in DataFrame.");
+
+        if (series is Series<float> sF32)
+        {
+            return sF32.AsTensorView(as2DColumn: true);
+        }
+
+        throw new NotSupportedException($"Series '{columnName}' of type {series.GetType().Name} is not a Float32 series.");
+    }
+
+    /// <summary>
+    /// Creates a zero-copy Tensor view for a single column, or converts selected columns into a 2D Tensor.
+    /// </summary>
+    public static Tensor<float> ToTensorView(this DataFrame df, params string[] columns)
+    {
+        if (df == null) throw new ArgumentNullException(nameof(df));
+
+        if (columns == null || columns.Length == 0)
+        {
+            if (df.Columns.Count == 1)
+            {
+                return df.ToTensorView(df.Columns[0].Name);
+            }
+            return df.ToTensor();
+        }
+
+        if (columns.Length == 1)
+        {
+            return df.ToTensorView(columns[0]);
+        }
+
+        // Multi-column projection into a unified 2D row-major block
+        return df.ToTensor(columns);
+    }
 }
