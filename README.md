@@ -197,6 +197,15 @@ using var mergedModel = lora.Merge();
 
 ---
 
+## 🆕 What's New in v1.0.8
+
+- **Defensive Unmanaged Memory Fortification (`NativeMemoryBlock<T>`)** — Strict parameter bounds validation in `AsSpan(offset, length)` preventing negative offsets, negative lengths, capacity overflows, and pointer integer wrapping.
+- **Thread-Isolated Direct3D 12 Diagnostics** — Structured hardware execution telemetry and failure stage reporting (`D3D12ExecutionStage`, `D3D12KernelDiagnostics`) backed by `[ThreadStatic]` diagnostic contexts, eliminating silent exception swallowing while ensuring complete thread isolation.
+- **Pluggable Ambient Logging** — Integrated zero-dependency `GlacierDiagnostics` / `IGlacierLogger`.
+- **194 unit tests** passing (100% green).
+
+---
+
 ## 🆕 What's New in v1.0.7
 
 - **`CudaExecutionContext` pool** — replaces the previous global `s_initLock` mutex, enabling lock-free concurrent GPU context acquisition.
