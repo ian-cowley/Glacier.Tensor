@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Glacier.Tensor.Core;
+using Glacier.Tensor.Diagnostics;
 using Vortice.D3DCompiler;
 using Vortice.Direct3D;
 using Vortice.Direct3D12;
@@ -44,8 +45,19 @@ public static unsafe class D3D12GemmKernel
     private static ulong s_capB;
     private static ulong s_capC;
 
+    private const int FenceTimeoutMilliseconds = 10_000;
+
     public static string DeviceName { get; private set; } = string.Empty;
     public static bool IsSupported => EnsureInitialized();
+    [ThreadStatic]
+    private static D3D12KernelDiagnostics? t_lastError;
+    public static D3D12KernelDiagnostics? LastError
+    {
+        get => t_lastError;
+        private set => t_lastError = value;
+    }
+    public static Exception? LastException => LastError?.Exception;
+    public static void ClearLastError() => t_lastError = null;
 
     public const string HlslSource = @"
 cbuffer Constants : register(b0)
@@ -182,6 +194,7 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                 {
                     s_available = false;
                     s_initialized = true;
+                    RecordError(D3D12ExecutionStage.Initialization, new PlatformNotSupportedException("Direct3D 12 is only supported on Windows."));
                     return false;
                 }
 
@@ -213,6 +226,7 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                 {
                     s_available = false;
                     s_initialized = true;
+                    RecordError(D3D12ExecutionStage.Initialization, new NotSupportedException("No compatible Direct3D 12 hardware adapter found."));
                     return false;
                 }
 
@@ -224,6 +238,7 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                 {
                     s_available = false;
                     s_initialized = true;
+                    RecordError(D3D12ExecutionStage.Initialization, new InvalidOperationException($"D3D12CreateDevice failed with HRESULT 0x{hr.Code:X8}."));
                     return false;
                 }
 
@@ -255,6 +270,7 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                 {
                     s_available = false;
                     s_initialized = true;
+                    RecordError(D3D12ExecutionStage.Initialization, new InvalidOperationException("Failed to compile GEMM HLSL compute shader bytecode."));
                     return false;
                 }
 
@@ -267,9 +283,10 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
 
                 s_available = true;
             }
-            catch
+            catch (Exception ex)
             {
                 s_available = false;
+                RecordError(D3D12ExecutionStage.Initialization, ex);
             }
             finally
             {
@@ -278,6 +295,71 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
 
             return s_available;
         }
+    }
+
+    private static D3D12KernelDiagnostics RecordError(
+        D3D12ExecutionStage stage,
+        Exception ex,
+        int m = 0, int k = 0, int n = 0,
+        ulong bytesA = 0, ulong bytesB = 0, ulong bytesC = 0,
+        uint gridX = 0, uint gridY = 0)
+    {
+        bool isDeviceRemoved = false;
+        int? removalHResult = null;
+        string? removalDesc = null;
+
+        if (s_device != null)
+        {
+            try
+            {
+                var reason = s_device.DeviceRemovedReason;
+                if (reason.Failure)
+                {
+                    isDeviceRemoved = true;
+                    removalHResult = reason.Code;
+                    removalDesc = reason.Description;
+                }
+            }
+            catch
+            {
+                // Ignore failure querying device removed reason
+            }
+        }
+
+        var diag = new D3D12KernelDiagnostics
+        {
+            Success = false,
+            Stage = stage,
+            DeviceName = DeviceName,
+            IsDeviceRemoved = isDeviceRemoved,
+            DeviceRemovedReasonHResult = removalHResult,
+            DeviceRemovedReasonDescription = removalDesc,
+            M = m,
+            K = k,
+            N = n,
+            BytesA = bytesA,
+            BytesB = bytesB,
+            BytesC = bytesC,
+            GridX = gridX,
+            GridY = gridY,
+            ExceptionType = ex.GetType().FullName,
+            ErrorMessage = ex.Message,
+            Exception = ex,
+            HResult = ex.HResult,
+            StackTrace = ex.StackTrace,
+            Timestamp = DateTimeOffset.UtcNow
+        };
+
+        LastError = diag;
+
+        GlacierDiagnostics.LogError(
+            $"[D3D12GemmKernel] Error at stage '{stage}' on device '{DeviceName}' " +
+            $"(GEMM [{m}x{k}] * [{k}x{n}] -> [{m}x{n}], Dispatch [{gridX},{gridY},1], " +
+            $"DeviceRemoved: {isDeviceRemoved}" +
+            (isDeviceRemoved ? $" [0x{removalHResult:X8}: {removalDesc}]" : "") +
+            $"): {ex.GetType().Name} - {ex.Message}", ex);
+
+        return diag;
     }
 
     private static void EnsureBuffers(ulong bytesA, ulong bytesB, ulong bytesC)
@@ -340,29 +422,73 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
         if (s_fence!.CompletedValue < s_fenceValue)
         {
             s_fence.SetEventOnCompletion(s_fenceValue, s_fenceEvent!);
-            s_fenceEvent!.WaitOne();
+            if (!s_fenceEvent!.WaitOne(FenceTimeoutMilliseconds))
+            {
+                throw new TimeoutException($"Direct3D 12 GPU fence synchronization timed out after {FenceTimeoutMilliseconds} ms.");
+            }
         }
     }
 
     public static bool Execute(Tensor<float> a, Tensor<float> b, Tensor<float> c)
     {
-        if (!EnsureInitialized()) return false;
+        return Execute(a, b, c, out _);
+    }
 
-        int M = a.Shape[0];
-        int K = a.Shape[1];
-        int N = b.Shape[1];
+    public static bool Execute(Tensor<float> a, Tensor<float> b, Tensor<float> c, out D3D12KernelDiagnostics? diagnostics)
+    {
+        diagnostics = null;
 
-        ulong bytesA = (ulong)(M * K * sizeof(float));
-        ulong bytesB = (ulong)(K * N * sizeof(float));
-        ulong bytesC = (ulong)(M * N * sizeof(float));
+        ArgumentNullException.ThrowIfNull(a, nameof(a));
+        ArgumentNullException.ThrowIfNull(b, nameof(b));
+        ArgumentNullException.ThrowIfNull(c, nameof(c));
 
-        lock (s_lock)
+        D3D12ExecutionStage stage = D3D12ExecutionStage.ArgumentValidation;
+        int m = 0, k = 0, n = 0;
+        ulong bytesA = 0, bytesB = 0, bytesC = 0;
+        uint gridX = 0, gridY = 0;
+
+        try
         {
-            try
+            if (a.Rank != 2)
+                throw new ArgumentException($"Tensor 'a' must be 2D matrix (Rank=2), got {a.Rank}.", nameof(a));
+            if (b.Rank != 2)
+                throw new ArgumentException($"Tensor 'b' must be 2D matrix (Rank=2), got {b.Rank}.", nameof(b));
+            if (c.Rank != 2)
+                throw new ArgumentException($"Tensor 'c' must be 2D matrix (Rank=2), got {c.Rank}.", nameof(c));
+
+            if (a.Shape[1] != b.Shape[0])
+                throw new ArgumentException($"Inner matrix dimensions mismatch: a.Shape[1] ({a.Shape[1]}) != b.Shape[0] ({b.Shape[0]}).");
+
+            if (c.Shape[0] != a.Shape[0] || c.Shape[1] != b.Shape[1])
+                throw new ArgumentException($"Result tensor shape [{c.Shape[0]}, {c.Shape[1]}] does not match product dimensions [{a.Shape[0]}, {b.Shape[1]}].");
+
+            if (!a.IsContiguous || !b.IsContiguous || !c.IsContiguous)
+                throw new InvalidOperationException("Direct3D 12 GEMM requires contiguous memory layout for all operands.");
+
+            m = a.Shape[0];
+            k = a.Shape[1];
+            n = b.Shape[1];
+
+            bytesA = (ulong)(m * k * sizeof(float));
+            bytesB = (ulong)(k * n * sizeof(float));
+            bytesC = (ulong)(m * n * sizeof(float));
+
+            gridX = (uint)((n + 63) / 64);
+            gridY = (uint)((m + 63) / 64);
+
+            stage = D3D12ExecutionStage.Initialization;
+            if (!EnsureInitialized())
             {
+                diagnostics = RecordError(stage, new InvalidOperationException("Direct3D 12 initialization failed or device not available on this platform."), m, k, n, bytesA, bytesB, bytesC, gridX, gridY);
+                return false;
+            }
+
+            lock (s_lock)
+            {
+                stage = D3D12ExecutionStage.BufferAllocation;
                 EnsureBuffers(bytesA, bytesB, bytesC);
 
-                // Upload A and B
+                stage = D3D12ExecutionStage.HostUpload;
                 fixed (float* pA = a.AsSpan(), pB = b.AsSpan())
                 {
                     void* pUpA = null;
@@ -376,6 +502,7 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                     s_uploadB.Unmap(0);
                 }
 
+                stage = D3D12ExecutionStage.CommandRecording;
                 s_cmdAlloc!.Reset();
                 s_cmdList!.Reset(s_cmdAlloc, null);
 
@@ -394,9 +521,9 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                 s_cmdList.SetPipelineState(s_pipelineState!);
 
                 uint* pConsts = stackalloc uint[4];
-                pConsts[0] = (uint)M;
-                pConsts[1] = (uint)K;
-                pConsts[2] = (uint)N;
+                pConsts[0] = (uint)m;
+                pConsts[1] = (uint)k;
+                pConsts[2] = (uint)n;
                 pConsts[3] = 0;
                 s_cmdList.SetComputeRoot32BitConstants(0, 4, (IntPtr)pConsts, 0);
 
@@ -404,9 +531,7 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                 s_cmdList.SetComputeRootShaderResourceView(2, s_devB!.GPUVirtualAddress);
                 s_cmdList.SetComputeRootUnorderedAccessView(3, s_devC!.GPUVirtualAddress);
 
-                // Dispatch 64x64 block tiles
-                uint gridX = (uint)((N + 63) / 64);
-                uint gridY = (uint)((M + 63) / 64);
+                stage = D3D12ExecutionStage.Dispatch;
                 s_cmdList.Dispatch(gridX, gridY, 1);
 
                 // Transition C for readback and revert A, B
@@ -417,11 +542,14 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                 s_cmdList.CopyBufferRegion(s_readbackC!, 0, s_devC!, 0, bytesC);
                 s_cmdList.ResourceBarrierTransition(s_devC!, ResourceStates.CopySource, ResourceStates.Common);
 
+                stage = D3D12ExecutionStage.QueueExecution;
                 s_cmdList.Close();
                 s_queue!.ExecuteCommandList(s_cmdList);
+
+                stage = D3D12ExecutionStage.FenceSynchronization;
                 Synchronize();
 
-                // Readback results
+                stage = D3D12ExecutionStage.DeviceReadback;
                 fixed (float* pC = c.AsSpan())
                 {
                     void* pRead = null;
@@ -430,12 +558,30 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                     s_readbackC.Unmap(0);
                 }
 
+                t_lastError = null;
+                diagnostics = new D3D12KernelDiagnostics
+                {
+                    Success = true,
+                    Stage = D3D12ExecutionStage.None,
+                    DeviceName = DeviceName,
+                    M = m,
+                    K = k,
+                    N = n,
+                    BytesA = bytesA,
+                    BytesB = bytesB,
+                    BytesC = bytesC,
+                    GridX = gridX,
+                    GridY = gridY,
+                    Timestamp = DateTimeOffset.UtcNow
+                };
+
                 return true;
             }
-            catch
-            {
-                return false;
-            }
+        }
+        catch (Exception ex)
+        {
+            diagnostics = RecordError(stage, ex, m, k, n, bytesA, bytesB, bytesC, gridX, gridY);
+            return false;
         }
     }
 }

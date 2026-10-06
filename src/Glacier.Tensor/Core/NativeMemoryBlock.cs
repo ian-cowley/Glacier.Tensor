@@ -51,6 +51,9 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
 
     public NativeMemoryBlock(T* externalPointer, long elementCount, bool ownsMemory = false, IDisposable? lifetimeOwner = null)
     {
+        if (elementCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(elementCount));
+
         _pointer = externalPointer;
         _elementCount = elementCount;
         _byteLength = (nuint)(elementCount * sizeof(T));
@@ -68,9 +71,31 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
     public Span<T> AsSpan(long offset = 0, int length = -1)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_pointer == null) return Span<T>.Empty;
+        ArgumentOutOfRangeException.ThrowIfNegative(offset, nameof(offset));
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(offset, _elementCount, nameof(offset));
 
-        int len = length >= 0 ? length : (int)(_elementCount - offset);
+        int len;
+        if (length == -1)
+        {
+            long remaining = _elementCount - offset;
+            if (remaining > int.MaxValue)
+            {
+                throw new ArgumentOutOfRangeException(nameof(length), remaining, "Remaining element count exceeds maximum Span<T> length.");
+            }
+            len = (int)remaining;
+        }
+        else
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(length, nameof(length));
+            if (length > _elementCount - offset)
+            {
+                throw new ArgumentOutOfRangeException(nameof(length), length, "Requested length exceeds available element capacity.");
+            }
+            len = length;
+        }
+
+        if (_pointer == null || len == 0) return Span<T>.Empty;
+
         return new Span<T>(_pointer + offset, len);
     }
 
