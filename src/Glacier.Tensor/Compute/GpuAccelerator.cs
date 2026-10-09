@@ -18,7 +18,7 @@ namespace Glacier.Tensor.Compute;
 /// Directly offloads tensor operations to NVIDIA SASS (RTX 4060 dGPU), AMD zero-copy unified memory (Radeon 890M APU),
 /// or multi-threaded cache-blocked AVX-512 CPU microkernels.
 /// </summary>
-public static unsafe class GpuAccelerator
+public static unsafe partial class GpuAccelerator
 {
     private static readonly Lock s_initLock = new();
     private static bool s_nvidiaInitialized;

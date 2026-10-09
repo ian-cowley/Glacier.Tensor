@@ -15,7 +15,7 @@ namespace Glacier.Tensor.Compute;
 /// Utilizes a 16x16 shared-memory tiled compute shader with double buffering, Wave32 optimization,
 /// and direct root descriptors for zero-overhead execution across AMD Radeon APUs and DirectX 12 GPUs.
 /// </summary>
-public static unsafe class D3D12GemmKernel
+public static unsafe partial class D3D12GemmKernel
 {
     private static readonly Lock s_lock = new();
     private static bool s_initialized;
@@ -49,6 +49,14 @@ public static unsafe class D3D12GemmKernel
 
     public static string DeviceName { get; private set; } = string.Empty;
     public static bool IsSupported => EnsureInitialized();
+    public static ID3D12Device? Device
+    {
+        get
+        {
+            EnsureInitialized();
+            return s_device;
+        }
+    }
     [ThreadStatic]
     private static D3D12KernelDiagnostics? t_lastError;
     public static D3D12KernelDiagnostics? LastError
@@ -200,6 +208,9 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
 
                 s_factory = DXGI.CreateDXGIFactory1<IDXGIFactory4>();
                 IDXGIAdapter1? chosenAdapter = null;
+                nuint maxVram = 0;
+                string? envAdapter = Environment.GetEnvironmentVariable("GLACIER_GPU_ADAPTER");
+
                 for (uint i = 0; s_factory.EnumAdapters1(i, out IDXGIAdapter1 a).Success; i++)
                 {
                     var desc = a.Description1;
@@ -209,17 +220,23 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                         continue;
                     }
 
-                    // Prefer AMD Radeon adapter, otherwise first hardware GPU
-                    if (desc.Description.Contains("Radeon", StringComparison.OrdinalIgnoreCase))
+                    if (!string.IsNullOrEmpty(envAdapter) && desc.Description.Contains(envAdapter, StringComparison.OrdinalIgnoreCase))
                     {
+                        chosenAdapter?.Dispose();
                         chosenAdapter = a;
                         break;
                     }
 
-                    if (chosenAdapter == null)
+                    if (chosenAdapter == null || desc.DedicatedVideoMemory > maxVram)
+                    {
+                        chosenAdapter?.Dispose();
                         chosenAdapter = a;
+                        maxVram = desc.DedicatedVideoMemory;
+                    }
                     else
+                    {
                         a.Dispose();
+                    }
                 }
 
                 if (chosenAdapter == null)
@@ -557,6 +574,180 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                     Buffer.MemoryCopy(pRead, pC, bytesC, bytesC);
                     s_readbackC.Unmap(0);
                 }
+
+                t_lastError = null;
+                diagnostics = new D3D12KernelDiagnostics
+                {
+                    Success = true,
+                    Stage = D3D12ExecutionStage.None,
+                    DeviceName = DeviceName,
+                    M = m,
+                    K = k,
+                    N = n,
+                    BytesA = bytesA,
+                    BytesB = bytesB,
+                    BytesC = bytesC,
+                    GridX = gridX,
+                    GridY = gridY,
+                    Timestamp = DateTimeOffset.UtcNow
+                };
+
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            diagnostics = RecordError(stage, ex, m, k, n, bytesA, bytesB, bytesC, gridX, gridY);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Pre-loads operands A and B into GPU device-resident VRAM buffers across PCIe.
+    /// </summary>
+    public static void UploadBuffers(ReadOnlySpan<float> a, ReadOnlySpan<float> b, int m, int k, int n)
+    {
+        ulong bytesA = (ulong)(m * k * sizeof(float));
+        ulong bytesB = (ulong)(k * n * sizeof(float));
+        ulong bytesC = (ulong)(m * n * sizeof(float));
+
+        if (!EnsureInitialized())
+            throw new InvalidOperationException("Direct3D 12 device is not available.");
+
+        lock (s_lock)
+        {
+            EnsureBuffers(bytesA, bytesB, bytesC);
+
+            fixed (float* pA = a, pB = b)
+            {
+                void* pUpA = null;
+                s_uploadA!.Map(0, null, &pUpA);
+                Buffer.MemoryCopy(pA, pUpA, bytesA, bytesA);
+                s_uploadA.Unmap(0);
+
+                void* pUpB = null;
+                s_uploadB!.Map(0, null, &pUpB);
+                Buffer.MemoryCopy(pB, pUpB, bytesB, bytesB);
+                s_uploadB.Unmap(0);
+            }
+
+            s_cmdAlloc!.Reset();
+            s_cmdList!.Reset(s_cmdAlloc, null);
+
+            s_cmdList.ResourceBarrierTransition(s_devA!, ResourceStates.Common, ResourceStates.CopyDest);
+            s_cmdList.ResourceBarrierTransition(s_devB!, ResourceStates.Common, ResourceStates.CopyDest);
+            s_cmdList.CopyBufferRegion(s_devA!, 0, s_uploadA!, 0, bytesA);
+            s_cmdList.CopyBufferRegion(s_devB!, 0, s_uploadB!, 0, bytesB);
+            s_cmdList.ResourceBarrierTransition(s_devA!, ResourceStates.CopyDest, ResourceStates.Common);
+            s_cmdList.ResourceBarrierTransition(s_devB!, ResourceStates.CopyDest, ResourceStates.Common);
+
+            s_cmdList.Close();
+            s_queue!.ExecuteCommandList(s_cmdList);
+            Synchronize();
+        }
+    }
+
+    /// <summary>
+    /// Reads back result matrix C from GPU device-resident VRAM into host memory.
+    /// </summary>
+    public static void ReadbackBufferC(Span<float> c, int m, int n)
+    {
+        ulong bytesC = (ulong)(m * n * sizeof(float));
+        if (s_devC == null || s_readbackC == null)
+            throw new InvalidOperationException("GPU device buffers not allocated.");
+
+        lock (s_lock)
+        {
+            s_cmdAlloc!.Reset();
+            s_cmdList!.Reset(s_cmdAlloc, null);
+
+            s_cmdList.ResourceBarrierTransition(s_devC!, ResourceStates.Common, ResourceStates.CopySource);
+            s_cmdList.CopyBufferRegion(s_readbackC!, 0, s_devC!, 0, bytesC);
+            s_cmdList.ResourceBarrierTransition(s_devC!, ResourceStates.CopySource, ResourceStates.Common);
+
+            s_cmdList.Close();
+            s_queue!.ExecuteCommandList(s_cmdList);
+            Synchronize();
+
+            fixed (float* pC = c)
+            {
+                void* pRead = null;
+                s_readbackC!.Map(0, null, &pRead);
+                Buffer.MemoryCopy(pRead, pC, bytesC, bytesC);
+                s_readbackC.Unmap(0);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Executes GEMM purely in GPU device-resident VRAM without PCIe host upload/readback overhead.
+    /// Operates on the persistent GPU device buffers s_devA, s_devB, s_devC.
+    /// </summary>
+    public static bool ExecuteResident(int m, int k, int n) => ExecuteResident(m, k, n, out _);
+
+    /// <summary>
+    /// Executes GEMM purely in GPU device-resident VRAM without PCIe host upload/readback overhead.
+    /// Operates on the persistent GPU device buffers s_devA, s_devB, s_devC.
+    /// </summary>
+    public static bool ExecuteResident(int m, int k, int n, out D3D12KernelDiagnostics? diagnostics)
+    {
+        diagnostics = null;
+        D3D12ExecutionStage stage = D3D12ExecutionStage.ArgumentValidation;
+        ulong bytesA = (ulong)(m * k * sizeof(float));
+        ulong bytesB = (ulong)(k * n * sizeof(float));
+        ulong bytesC = (ulong)(m * n * sizeof(float));
+        uint gridX = (uint)((n + 63) / 64);
+        uint gridY = (uint)((m + 63) / 64);
+
+        try
+        {
+            stage = D3D12ExecutionStage.Initialization;
+            if (!EnsureInitialized())
+            {
+                diagnostics = RecordError(stage, new InvalidOperationException("Direct3D 12 initialization failed or device not available on this platform."), m, k, n, bytesA, bytesB, bytesC, gridX, gridY);
+                return false;
+            }
+
+            lock (s_lock)
+            {
+                stage = D3D12ExecutionStage.BufferAllocation;
+                EnsureBuffers(bytesA, bytesB, bytesC);
+
+                stage = D3D12ExecutionStage.CommandRecording;
+                s_cmdAlloc!.Reset();
+                s_cmdList!.Reset(s_cmdAlloc, null);
+
+                s_cmdList.ResourceBarrierTransition(s_devA!, ResourceStates.Common, ResourceStates.NonPixelShaderResource);
+                s_cmdList.ResourceBarrierTransition(s_devB!, ResourceStates.Common, ResourceStates.NonPixelShaderResource);
+                s_cmdList.ResourceBarrierTransition(s_devC!, ResourceStates.Common, ResourceStates.UnorderedAccess);
+
+                s_cmdList.SetComputeRootSignature(s_rootSig!);
+                s_cmdList.SetPipelineState(s_pipelineState!);
+
+                uint* pConsts = stackalloc uint[4];
+                pConsts[0] = (uint)m;
+                pConsts[1] = (uint)k;
+                pConsts[2] = (uint)n;
+                pConsts[3] = 0;
+                s_cmdList.SetComputeRoot32BitConstants(0, 4, (IntPtr)pConsts, 0);
+
+                s_cmdList.SetComputeRootShaderResourceView(1, s_devA!.GPUVirtualAddress);
+                s_cmdList.SetComputeRootShaderResourceView(2, s_devB!.GPUVirtualAddress);
+                s_cmdList.SetComputeRootUnorderedAccessView(3, s_devC!.GPUVirtualAddress);
+
+                stage = D3D12ExecutionStage.Dispatch;
+                s_cmdList.Dispatch(gridX, gridY, 1);
+
+                s_cmdList.ResourceBarrierTransition(s_devC!, ResourceStates.UnorderedAccess, ResourceStates.Common);
+                s_cmdList.ResourceBarrierTransition(s_devA!, ResourceStates.NonPixelShaderResource, ResourceStates.Common);
+                s_cmdList.ResourceBarrierTransition(s_devB!, ResourceStates.NonPixelShaderResource, ResourceStates.Common);
+
+                stage = D3D12ExecutionStage.QueueExecution;
+                s_cmdList.Close();
+                s_queue!.ExecuteCommandList(s_cmdList);
+
+                stage = D3D12ExecutionStage.FenceSynchronization;
+                Synchronize();
 
                 t_lastError = null;
                 diagnostics = new D3D12KernelDiagnostics
