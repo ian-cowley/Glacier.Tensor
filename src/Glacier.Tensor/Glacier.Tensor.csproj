@@ -39,6 +39,6 @@
     <ProjectReference Include="..\..\..\Glacier.Gpu\src\Glacier.Gpu\Glacier.Gpu.csproj" />
   </ItemGroup>
   <ItemGroup Condition="!Exists('..\..\..\Glacier.Gpu\src\Glacier.Gpu\Glacier.Gpu.csproj')">
-    <PackageReference Include="Glacier.Gpu" Version="1.0.8" />
+    <PackageReference Include="Glacier.Gpu" Version="1.0.9" />
   </ItemGroup>
 </Project>

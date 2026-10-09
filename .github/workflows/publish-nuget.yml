@@ -32,6 +32,17 @@ jobs:
           mkdir -p ../nuget-local
           dotnet nuget add source --name "github-packages" --username "${{ github.repository_owner }}" --password "${{ secrets.GITHUB_TOKEN }}" --store-password-in-clear-text "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" || true
 
+      - name: Checkout Glacier.Gpu dependency
+        uses: actions/checkout@v4
+        with:
+          repository: ian-cowley/Glacier.Gpu
+          path: Glacier.Gpu-dep
+
+      - name: Build local Glacier.Gpu package
+        run: |
+          dotnet pack Glacier.Gpu-dep/src/Glacier.Gpu/Glacier.Gpu.csproj -c Release -o ../nuget-local
+          dotnet nuget add source "$(pwd)/../nuget-local" --name "local-glacier" || true
+
       - name: Wait for upstream NuGet packages to be available
         run: |
           wait_for_nuget() {
@@ -45,7 +56,6 @@ jobs:
             echo "  $pkg $ver is available."
           }
           wait_for_nuget Glacier.Polaris 1.0.17
-          wait_for_nuget Glacier.Gpu 1.0.7
 
       - name: Restore dependencies
         run: dotnet restore
