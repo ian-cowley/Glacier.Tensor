@@ -72,7 +72,7 @@ Deep learning in Python is dominated by **TensorFlow** and **PyTorch**. While th
 | Deep Learning Task | Workload Scope | PyTorch CPU (v2.x) | Glacier.Tensor (CPU AVX-512) | Glacier.Tensor (Radeon 890M D3D12) | Glacier.Tensor (RTX 4060 Resident) | Speedup vs PyTorch |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **GEMM Matrix Multiply** | $512 \times 512$ FP32 | 12 ms | **0.88 ms** | **0.69 ms** | **0.22 ms (1.22 TFLOPS)** | **54.5x** |
-| **GEMM Matrix Multiply** | $1024 \times 1024$ FP32 | 48 ms | **4.34 ms (0.50 TFLOPS)** | **1.95 ms (1.10 TFLOPS)** | **0.46 ms (4.72 TFLOPS)** | **104.3x** |
+| **GEMM Matrix Multiply** | $1024 \times 1024$ FP32 | 4.03 ms | **3.46 ms (0.62 TFLOPS)** | **1.79 ms (1.20 TFLOPS)** | **0.67 ms (3.23 TFLOPS, 3.63T peak)** | **6.0x vs PyTorch CPU** |
 | **GEMM Matrix Multiply** | $2048 \times 2048$ FP32 | ~380 ms | **34.2 ms (0.50 TFLOPS)** | **12.31 ms (1.40 TFLOPS)**| **3.28 ms (5.23 TFLOPS)** | **115.8x** |
 | **Qwen 2.5 7B LoRA (q_proj)** | $512 \times 3584$ ($r=16$) | ~340 ms | **32.7 ms (15,679 tok/s)** | — | **14.2 ms (36,056 tok/s)** | **23.9x** |
 | **ResNet-50 Forward Pass** | Batch size 1 (Inference) | 28 ms | 16.0 ms | **5.40 ms** | **2.80 ms** | **10.0x** |

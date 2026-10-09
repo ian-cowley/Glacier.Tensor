@@ -229,7 +229,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
         ObjectDisposedException.ThrowIf(_disposed, this);
         if ((uint)dimension >= (uint)_shape.Rank)
             throw new ArgumentOutOfRangeException(nameof(dimension));
-        if (start < 0 || length < 0 || start + length > _shape[dimension])
+        if (start < 0 || length < 0 || (long)start + length > _shape[dimension])
             throw new ArgumentOutOfRangeException(nameof(start), "Slice range is out of bounds.");
 
         Span<int> newDims = stackalloc int[_shape.Rank];
@@ -261,6 +261,9 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
             throw new ArgumentException("MatMul requires Rank 2 matrices.");
         if (a.Shape[1] != b.Shape[0])
             throw new ArgumentException($"Inner dimension mismatch: {a.Shape[1]} != {b.Shape[0]}");
+
+        if (!a.IsContiguous || !b.IsContiguous)
+            throw new InvalidOperationException("DeviceResidentTensor.MatMul requires contiguous tensors. Sliced or strided views must be copied to a contiguous buffer prior to GEMM execution.");
 
         int m = a.Shape[0];
         int k = a.Shape[1];
