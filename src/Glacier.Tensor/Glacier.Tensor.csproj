@@ -30,7 +30,7 @@
 
   <ItemGroup>
     <PackageReference Include="Glacier.Compute" Version="1.0.0" />
-    <PackageReference Include="Glacier.Polaris" Version="1.0.19" />
+    <PackageReference Include="Glacier.Polaris" Version="1.0.20" />
     <PackageReference Include="Glacier.Gpu" Version="1.0.8" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
