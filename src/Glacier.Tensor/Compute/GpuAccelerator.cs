@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -61,82 +62,16 @@ public static unsafe partial class GpuAccelerator
         lock (s_initLock)
         {
             if (s_nvidiaInitialized) return s_nvidiaAvailable;
+            if (!CuDriver.IsAvailable())
+            {
+                s_nvidiaAvailable = false;
+                s_nvidiaInitialized = true;
+                return false;
+            }
+
             try
             {
-                if (!CuDriver.IsAvailable())
-                {
-                    s_nvidiaAvailable = false;
-                    s_nvidiaInitialized = true;
-                    return false;
-                }
-
-                CuDriver.Init(0);
-                if (CuDriver.DeviceGetCount(out int count) != 0 || count == 0)
-                {
-                    s_nvidiaAvailable = false;
-                    s_nvidiaInitialized = true;
-                    return false;
-                }
-
-                CuDriver.DeviceGet(out int dev, 0);
-                string arch = CuDriver.GetComputeCapability(dev);
-
-                // If GpuAccelerator.Engine already has an active NvidiaSassEngine, reuse its context!
-                if (s_gpuEngine.Value is HeterogeneousEngine het && het.Nvidia is { IsInitialized: true } nvHet)
-                {
-                    s_cuContext = nvHet.ContextHandle;
-                }
-                else if (s_gpuEngine.Value is NvidiaSassEngine nvEng && nvEng.IsInitialized)
-                {
-                    s_cuContext = nvEng.ContextHandle;
-                }
-
-                if (s_cuContext == IntPtr.Zero)
-                {
-                    int ctxRes = CuDriver.CtxCreate(out s_cuContext, 0, dev);
-                    if (ctxRes != 0)
-                    {
-                        CuDriver.CtxGetCurrent(out s_cuContext);
-                    }
-                }
-
-                if (s_cuContext != IntPtr.Zero)
-                {
-                    CuDriver.CtxSetCurrent(s_cuContext);
-                }
-
-                byte[] cubin = KernelCache.GetOrCompile(arch, "FastGemmFp32", FastGemmKernel.PtxSource);
-                int modRes = CuDriver.ModuleLoadData(out s_cuModule, cubin);
-                if (modRes != 0)
-                {
-                    s_nvidiaAvailable = false;
-                    s_nvidiaInitialized = true;
-                    return false;
-                }
-
-                int fnRes = CuDriver.ModuleGetFunction(out s_cuGemmFn, s_cuModule, "fast_gemm_fp32");
-                if (fnRes != 0)
-                {
-                    s_nvidiaAvailable = false;
-                    s_nvidiaInitialized = true;
-                    return false;
-                }
-
-                try
-                {
-                    byte[] cubinTc = KernelCache.GetOrCompile(arch, "TensorCoreGemm", TensorCoreGemmKernel.PtxSource);
-                    if (CuDriver.ModuleLoadData(out s_cuModuleTensorCore, cubinTc) == 0)
-                    {
-                        CuDriver.ModuleGetFunction(out s_cuTensorCoreFp32Fn, s_cuModuleTensorCore, "tensor_core_gemm_fp32");
-                        CuDriver.ModuleGetFunction(out s_cuTensorCoreFp16Fn, s_cuModuleTensorCore, "tensor_core_gemm_fp16");
-                    }
-                }
-                catch
-                {
-                    // Tensor core module load is optional, standard GEMM will remain primary
-                }
-
-                s_nvidiaAvailable = true;
+                s_nvidiaAvailable = InitializeNvidiaDriverCore();
             }
             catch
             {
@@ -149,6 +84,72 @@ public static unsafe partial class GpuAccelerator
 
             return s_nvidiaAvailable;
         }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool InitializeNvidiaDriverCore()
+    {
+        CuDriver.Init(0);
+        if (CuDriver.DeviceGetCount(out int count) != 0 || count == 0)
+        {
+            return false;
+        }
+
+        CuDriver.DeviceGet(out int dev, 0);
+        string arch = CuDriver.GetComputeCapability(dev);
+
+        // If GpuAccelerator.Engine already has an active NvidiaSassEngine, reuse its context!
+        if (s_gpuEngine.Value is HeterogeneousEngine het && het.Nvidia is { IsInitialized: true } nvHet)
+        {
+            s_cuContext = nvHet.ContextHandle;
+        }
+        else if (s_gpuEngine.Value is NvidiaSassEngine nvEng && nvEng.IsInitialized)
+        {
+            s_cuContext = nvEng.ContextHandle;
+        }
+
+        if (s_cuContext == IntPtr.Zero)
+        {
+            int ctxRes = CuDriver.CtxCreate(out s_cuContext, 0, dev);
+            if (ctxRes != 0)
+            {
+                CuDriver.CtxGetCurrent(out s_cuContext);
+            }
+        }
+
+        if (s_cuContext != IntPtr.Zero)
+        {
+            CuDriver.CtxSetCurrent(s_cuContext);
+        }
+
+        byte[] cubin = KernelCache.GetOrCompile(arch, "FastGemmFp32", FastGemmKernel.PtxSource);
+        int modRes = CuDriver.ModuleLoadData(out s_cuModule, cubin);
+        if (modRes != 0)
+        {
+            return false;
+        }
+
+        int fnRes = CuDriver.ModuleGetFunction(out s_cuGemmFn, s_cuModule, "fast_gemm_fp32");
+        if (fnRes != 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            byte[] cubinTc = KernelCache.GetOrCompile(arch, "TensorCoreGemm", TensorCoreGemmKernel.PtxSource);
+            if (CuDriver.ModuleLoadData(out s_cuModuleTensorCore, cubinTc) == 0)
+            {
+                CuDriver.ModuleGetFunction(out s_cuTensorCoreFp32Fn, s_cuModuleTensorCore, "tensor_core_gemm_fp32");
+                CuDriver.ModuleGetFunction(out s_cuTensorCoreFp16Fn, s_cuModuleTensorCore, "tensor_core_gemm_fp16");
+            }
+        }
+        catch
+        {
+            // Tensor core module load is optional, standard GEMM will remain primary
+        }
+
+        return true;
     }
 
     private static bool EnsureAmdInitialized()
@@ -204,16 +205,16 @@ public static unsafe partial class GpuAccelerator
                 return;
 
             case GpuTarget.Nvidia:
-                if (!ExecuteNvidiaGemm(a, b, c))
+                if (!EnsureNvidiaInitialized() || !ExecuteNvidiaGemm(a, b, c))
                 {
                     GemmKernels.MatMul(a, b, c);
                 }
                 return;
 
             case GpuTarget.NvidiaTensorCore:
-                if (!ExecuteNvidiaTensorCoreGemm(a, b, c))
+                if (!EnsureNvidiaInitialized() || !ExecuteNvidiaTensorCoreGemm(a, b, c))
                 {
-                    if (!ExecuteNvidiaGemm(a, b, c))
+                    if (!EnsureNvidiaInitialized() || !ExecuteNvidiaGemm(a, b, c))
                     {
                         GemmKernels.MatMul(a, b, c);
                     }
@@ -315,7 +316,12 @@ public static unsafe partial class GpuAccelerator
     public static bool ExecuteNvidiaGemm(Tensor<float> a, Tensor<float> b, Tensor<float> c)
     {
         if (!EnsureNvidiaInitialized()) return false;
+        return ExecuteNvidiaGemmCore(a, b, c);
+    }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool ExecuteNvidiaGemmCore(Tensor<float> a, Tensor<float> b, Tensor<float> c)
+    {
         int M = a.Shape[0];
         int K = a.Shape[1];
         int N = b.Shape[1];
@@ -427,7 +433,12 @@ public static unsafe partial class GpuAccelerator
     public static bool ExecuteNvidiaTensorCoreGemm(Tensor<float> a, Tensor<float> b, Tensor<float> c)
     {
         if (!EnsureNvidiaInitialized() || s_cuTensorCoreFp32Fn == IntPtr.Zero) return false;
+        return ExecuteNvidiaTensorCoreGemmCore(a, b, c);
+    }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool ExecuteNvidiaTensorCoreGemmCore(Tensor<float> a, Tensor<float> b, Tensor<float> c)
+    {
         int M = a.Shape[0];
         int K = a.Shape[1];
         int N = b.Shape[1];

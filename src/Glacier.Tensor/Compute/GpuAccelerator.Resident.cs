@@ -6,6 +6,7 @@
 namespace Glacier.Tensor.Compute;
 
 using System;
+using System.Runtime.CompilerServices;
 using Glacier.Gpu.Drivers;
 using Glacier.Tensor.Core;
 
@@ -56,6 +57,19 @@ public static unsafe partial class GpuAccelerator
         if (devA == IntPtr.Zero || devB == IntPtr.Zero || devC == IntPtr.Zero)
             return false;
 
+        return ExecuteNvidiaResidentGemmCore(devA, devB, devC, m, n, k, stream);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool ExecuteNvidiaResidentGemmCore(
+        IntPtr devA,
+        IntPtr devB,
+        IntPtr devC,
+        int m,
+        int n,
+        int k,
+        IntPtr stream)
+    {
         CuDriver.CtxSetCurrent(s_cuContext);
 
         IntPtr actualStream = stream;
@@ -156,6 +170,19 @@ public static unsafe partial class GpuAccelerator
         if (devA == IntPtr.Zero || devB == IntPtr.Zero || devC == IntPtr.Zero)
             return false;
 
+        return ExecuteNvidiaResidentTensorCoreGemmCore(devA, devB, devC, m, n, k, stream);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool ExecuteNvidiaResidentTensorCoreGemmCore(
+        IntPtr devA,
+        IntPtr devB,
+        IntPtr devC,
+        int m,
+        int n,
+        int k,
+        IntPtr stream)
+    {
         CuDriver.CtxSetCurrent(s_cuContext);
 
         IntPtr actualStream = stream;
