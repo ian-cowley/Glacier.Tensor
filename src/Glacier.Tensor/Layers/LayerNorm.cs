@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using Glacier.Tensor.Autograd;
+using Glacier.Tensor.Compute;
 using Glacier.Tensor.Core;
 
 namespace Glacier.Tensor.Layers;
@@ -39,42 +41,13 @@ public sealed class LayerNorm : ILayer
     public Tensor<float> Forward(Tensor<float> input)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        using var inC = input.Contiguous();
         var output = new Tensor<float>(input.Shape.AsSpan());
+        ElementwiseKernels.LayerNorm(input, _gamma, _beta, output, _eps);
 
-        int d = inC.Shape[inC.Rank - 1];
-        int batch = (int)(inC.ElementCount / d);
-
-        var inSpan = inC.AsSpan();
-        var outSpan = output.AsSpan();
-        var gammaSpan = _gamma.AsSpan();
-        var betaSpan = _beta.AsSpan();
-
-        for (int b = 0; b < batch; b++)
+        output.RequiresGrad = input.RequiresGrad || _gamma.RequiresGrad || _beta.RequiresGrad;
+        if (output.RequiresGrad && AutogradTape.Current is { IsExecutingBackward: false } tape)
         {
-            int offset = b * d;
-
-            // Calculate mean
-            float mean = 0f;
-            for (int i = 0; i < d; i++) mean += inSpan[offset + i];
-            mean /= d;
-
-            // Calculate variance
-            float var = 0f;
-            for (int i = 0; i < d; i++)
-            {
-                float diff = inSpan[offset + i] - mean;
-                var += diff * diff;
-            }
-            var /= d;
-            float invStd = 1.0f / MathF.Sqrt(var + _eps);
-
-            // Normalize and scale
-            for (int i = 0; i < d; i++)
-            {
-                float norm = (inSpan[offset + i] - mean) * invStd;
-                outSpan[offset + i] = norm * gammaSpan[i] + betaSpan[i];
-            }
+            tape.Record(new TapeEntry(AutogradOp.LayerNorm, output, input, _gamma, _eps, _beta));
         }
 
         return output;

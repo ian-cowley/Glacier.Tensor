@@ -16,6 +16,7 @@ public sealed class LoraLinear : ILayer
 {
     private readonly Tensor<float> _baseWeight;
     private readonly Tensor<float>? _baseBias;
+    private readonly bool _ownsBaseWeight;
     private readonly Tensor<float> _adapterA; // [InFeatures, Rank]
     private readonly Tensor<float> _adapterB; // [Rank, OutFeatures]
     private readonly float _scaling;
@@ -42,6 +43,11 @@ public sealed class LoraLinear : ILayer
     /// Constructs a LoRA layer wrapping existing base weights.
     /// </summary>
     public LoraLinear(Tensor<float> baseWeight, Tensor<float>? baseBias = null, int rank = 16, float alpha = 32f, int? seed = null)
+        : this(baseWeight, baseBias, rank, alpha, seed, ownsBaseWeight: false)
+    {
+    }
+
+    private LoraLinear(Tensor<float> baseWeight, Tensor<float>? baseBias, int rank, float alpha, int? seed, bool ownsBaseWeight)
     {
         _inFeatures = baseWeight.Shape[0];
         _outFeatures = baseWeight.Shape[1];
@@ -50,6 +56,7 @@ public sealed class LoraLinear : ILayer
 
         _baseWeight = baseWeight;
         _baseWeight.RequiresGrad = false;
+        _ownsBaseWeight = ownsBaseWeight;
 
         _baseBias = baseBias;
         if (_baseBias != null) _baseBias.RequiresGrad = false;
@@ -71,12 +78,12 @@ public sealed class LoraLinear : ILayer
     }
 
     /// <summary>
-    /// Creates a LoRA layer with newly allocated base weights.
+    /// Creates a LoRA layer with newly allocated base weights owned by the layer.
     /// </summary>
     public static LoraLinear Create(int inFeatures, int outFeatures, int rank = 16, float alpha = 32f, int? seed = null)
     {
         var baseW = TensorFloatExtensions.KaimingUniform([inFeatures, outFeatures], inFeatures, seed);
-        return new LoraLinear(baseW, null, rank, alpha, seed);
+        return new LoraLinear(baseW, null, rank, alpha, seed, ownsBaseWeight: true);
     }
 
     public Tensor<float> Forward(Tensor<float> input)
@@ -93,6 +100,14 @@ public sealed class LoraLinear : ILayer
 
         // 3. Combined output: Y = baseOut + scaledDelta
         var output = TensorOps.Add(baseOut, scaledDelta);
+
+        if (AutogradTape.Current == null)
+        {
+            scaledDelta.Dispose();
+            deltaOut.Dispose();
+            lowRank.Dispose();
+            baseOut.Dispose();
+        }
 
         // 4. Add base bias if present
         if (_baseBias != null)
@@ -150,9 +165,13 @@ public sealed class LoraLinear : ILayer
     {
         if (!_disposed)
         {
+            _disposed = true;
             _adapterA.Dispose();
             _adapterB.Dispose();
-            _disposed = true;
+            if (_ownsBaseWeight)
+            {
+                _baseWeight.Dispose();
+            }
         }
     }
 }

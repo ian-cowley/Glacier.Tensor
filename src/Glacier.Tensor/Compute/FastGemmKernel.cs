@@ -10,8 +10,8 @@ internal static class FastGemmKernel
 // Based on NVVM 7.0.1
 //
 
-.version 8.0
-.target sm_89
+.version 7.5
+.target sm_75
 .address_size 64
 
 	// .globl	fast_gemm_fp32

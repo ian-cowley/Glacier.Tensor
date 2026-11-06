@@ -199,6 +199,15 @@ using var mergedModel = lora.Merge();
 
 ---
 
+## 🆕 What's New in v1.1.0
+
+- **Expanded Reverse-Mode Autograd & View Differentiation** — Full reverse-mode backpropagation through `Softmax` (arbitrary inner/outer axes), `LayerNorm` (`dInput`, `dGamma`, `dBeta`), strided tensor views (`Slice`, `Transpose`, `Reshape`, `Contiguous`), and all five loss functions (`MSELoss`, `BinaryCrossEntropy`, `CrossEntropy`, `CategoricalCrossEntropyLoss`, `BrierScoreLoss`) supporting both `tape.Backward(lossTensor)` and `tape.Backward(predictions)`.
+- **Nested `[ThreadStatic]` Autograd Tape Stack** — Scoped stack-based `AutogradTape.Current` management so nested inner tapes cleanly restore outer tapes upon disposal without corrupting active graphs.
+- **Lock-Free CAS Reference Counting & Finalizer Safety (`NativeMemoryBlock<T>`)** — Atomic compare-exchange loops preventing `AddRef`/`Dispose` races, double-free immunity, and unmanaged finalizer safety, plus automatic intermediate activation disposal in `LoraLinear` and `Sequential` during inference.
+- **Multi-Architecture CUDA Context Binding & Native AOT Hardening** — Thread-safe worker CUDA context binding in `CudaExecutionContext` and `DeviceResidentTensor<T>`, Turing+ PTX headers (`sm_75+`), isolated Windows Direct3D 12 initialization, `<IsAotCompatible>true</IsAotCompatible>`, and NuGet OIDC Trusted Publishing.
+
+---
+
 ## 🆕 What's New in v1.0.8
 
 - **Defensive Unmanaged Memory Fortification (`NativeMemoryBlock<T>`)** — Strict parameter bounds validation in `AsSpan(offset, length)` preventing negative offsets, negative lengths, capacity overflows, and pointer integer wrapping.

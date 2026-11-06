@@ -20,7 +20,10 @@ public static class TensorOps
         GpuAccelerator.AcceleratedMatMul(a, b, c, target);
 
         c.RequiresGrad = a.RequiresGrad || b.RequiresGrad;
-        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.MatMul, c, a, b));
+        if (c.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.MatMul, c, a, b));
+        }
         return c;
     }
 
@@ -30,7 +33,10 @@ public static class TensorOps
         ElementwiseKernels.Add(a, b, c);
 
         c.RequiresGrad = a.RequiresGrad || b.RequiresGrad;
-        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Add, c, a, b));
+        if (c.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Add, c, a, b));
+        }
         return c;
     }
 
@@ -40,7 +46,10 @@ public static class TensorOps
         ElementwiseKernels.Subtract(a, b, c);
 
         c.RequiresGrad = a.RequiresGrad || b.RequiresGrad;
-        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Subtract, c, a, b));
+        if (c.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Subtract, c, a, b));
+        }
         return c;
     }
 
@@ -50,7 +59,10 @@ public static class TensorOps
         ElementwiseKernels.Multiply(a, b, c);
 
         c.RequiresGrad = a.RequiresGrad || b.RequiresGrad;
-        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Multiply, c, a, b));
+        if (c.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Multiply, c, a, b));
+        }
         return c;
     }
 
@@ -60,7 +72,10 @@ public static class TensorOps
         ElementwiseKernels.Scale(a, scalar, c);
 
         c.RequiresGrad = a.RequiresGrad;
-        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Scale, c, a, null, scalar));
+        if (c.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Scale, c, a, null, scalar));
+        }
         return c;
     }
 
@@ -70,7 +85,10 @@ public static class TensorOps
         ElementwiseKernels.ReLU(a, c);
 
         c.RequiresGrad = a.RequiresGrad;
-        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.ReLU, c, a));
+        if (c.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.ReLU, c, a));
+        }
         return c;
     }
 
@@ -80,7 +98,10 @@ public static class TensorOps
         ElementwiseKernels.Sigmoid(a, c);
 
         c.RequiresGrad = a.RequiresGrad;
-        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Sigmoid, c, a));
+        if (c.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Sigmoid, c, a));
+        }
         return c;
     }
 
@@ -90,7 +111,10 @@ public static class TensorOps
         ElementwiseKernels.GELU(a, c);
 
         c.RequiresGrad = a.RequiresGrad;
-        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.GELU, c, a));
+        if (c.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.GELU, c, a));
+        }
         return c;
     }
 
@@ -100,15 +124,24 @@ public static class TensorOps
         ElementwiseKernels.RMSNorm(a, weight, c, eps);
 
         c.RequiresGrad = a.RequiresGrad || (weight?.RequiresGrad == true);
-        AutogradTape.Current?.Record(new TapeEntry(AutogradOp.RMSNorm, c, a, weight, eps));
+        if (c.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.RMSNorm, c, a, weight, eps));
+        }
         return c;
     }
 
     public static Tensor<float> Softmax(Tensor<float> a, int dim = -1)
     {
+        int normalizedDim = dim < 0 ? dim + a.Rank : dim;
         var c = new Tensor<float>(a.Shape);
-        ElementwiseKernels.Softmax(a, c, dim);
+        ElementwiseKernels.Softmax(a, c, normalizedDim);
+
         c.RequiresGrad = a.RequiresGrad;
+        if (c.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.Softmax, c, a, intParam0: normalizedDim));
+        }
         return c;
     }
 }

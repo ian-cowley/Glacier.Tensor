@@ -17,12 +17,12 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
     private readonly bool _ownsMemory;
     private readonly IDisposable? _lifetimeOwner;
     private int _refCount;
-    private bool _disposed;
+    private int _disposed;
 
     public T* Pointer => _pointer;
     public long ElementCount => _elementCount;
     public nuint ByteLength => _byteLength;
-    public bool IsDisposed => _disposed;
+    public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
     public NativeMemoryBlock(long elementCount, bool clear = true)
     {
@@ -46,6 +46,7 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
         else
         {
             _pointer = null;
+            GC.SuppressFinalize(this);
         }
     }
 
@@ -60,17 +61,45 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
         _ownsMemory = ownsMemory;
         _lifetimeOwner = lifetimeOwner;
         _refCount = 1;
+
+        if (!ownsMemory && lifetimeOwner == null)
+        {
+            GC.SuppressFinalize(this);
+        }
+    }
+
+    ~NativeMemoryBlock()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            if (_ownsMemory && _pointer != null)
+            {
+                NativeMemory.AlignedFree(_pointer);
+                _pointer = null;
+            }
+        }
     }
 
     public void AddRef()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        Interlocked.Increment(ref _refCount);
+        while (true)
+        {
+            int current = Volatile.Read(ref _refCount);
+            if (current <= 0 || Volatile.Read(ref _disposed) != 0)
+            {
+                throw new ObjectDisposedException(nameof(NativeMemoryBlock<T>));
+            }
+
+            if (Interlocked.CompareExchange(ref _refCount, current + 1, current) == current)
+            {
+                return;
+            }
+        }
     }
 
     public Span<T> AsSpan(long offset = 0, int length = -1)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentOutOfRangeException.ThrowIfNegative(offset, nameof(offset));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(offset, _elementCount, nameof(offset));
 
@@ -101,17 +130,28 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
 
     public void Dispose()
     {
-        if (!_disposed)
+        while (true)
         {
-            if (Interlocked.Decrement(ref _refCount) == 0)
+            int current = Volatile.Read(ref _refCount);
+            if (current <= 0)
             {
-                _disposed = true;
-                if (_ownsMemory && _pointer != null)
+                return;
+            }
+
+            int next = current - 1;
+            if (Interlocked.CompareExchange(ref _refCount, next, current) == current)
+            {
+                if (next == 0 && Interlocked.Exchange(ref _disposed, 1) == 0)
                 {
-                    NativeMemory.AlignedFree(_pointer);
-                    _pointer = null;
+                    if (_ownsMemory && _pointer != null)
+                    {
+                        NativeMemory.AlignedFree(_pointer);
+                        _pointer = null;
+                    }
+                    _lifetimeOwner?.Dispose();
+                    GC.SuppressFinalize(this);
                 }
-                _lifetimeOwner?.Dispose();
+                return;
             }
         }
     }

@@ -4,6 +4,8 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using Glacier.Gpu.Drivers;
+using Glacier.Tensor.Autograd;
+using Glacier.Tensor.Compute;
 
 namespace Glacier.Tensor.Core;
 
@@ -155,14 +157,16 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         ObjectDisposedException.ThrowIf(_disposed, this);
         if ((uint)dimension >= (uint)Rank)
             throw new ArgumentOutOfRangeException(nameof(dimension));
-        if (start < 0 || start + length > _shape[dimension])
+        if (start < 0 || length < 0 || (long)start + length > _shape[dimension])
             throw new ArgumentOutOfRangeException($"Invalid slice: start {start}, len {length} for dim size {_shape[dimension]}");
 
         long newOffset = _elementOffset + (long)start * _strides[dimension];
         Shape8 newShape = _shape.WithDimension(dimension, length);
 
         _memory.AddRef();
-        return new Tensor<T>(_memory, newShape, _strides, newOffset);
+        var result = new Tensor<T>(_memory, newShape, _strides, newOffset);
+        RecordViewOpIfNeeded(AutogradOp.Slice, result, dimension, start, length);
+        return result;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -173,7 +177,9 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         Shape8 newStrides = _strides.SwapDimensions(dim0, dim1);
 
         _memory.AddRef();
-        return new Tensor<T>(_memory, newShape, newStrides, _elementOffset);
+        var result = new Tensor<T>(_memory, newShape, newStrides, _elementOffset);
+        RecordViewOpIfNeeded(AutogradOp.Transpose, result, dim0, dim1, 0);
+        return result;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -191,28 +197,38 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         if (shape.ElementCount != ElementCount)
             throw new ArgumentException($"Cannot reshape tensor of {ElementCount} elements to shape with {shape.ElementCount} elements.");
 
+        Tensor<T> result;
         if (IsContiguous)
         {
             _memory.AddRef();
-            return new Tensor<T>(_memory, shape, Shape8.ComputeContiguousStrides(shape), _elementOffset);
+            result = new Tensor<T>(_memory, shape, Shape8.ComputeContiguousStrides(shape), _elementOffset);
+        }
+        else
+        {
+            result = new Tensor<T>(shape);
+            CopyElementsToFlatSpan(this, result.AsSpan());
         }
 
-        // Non-contiguous: make contiguous copy first
-        using var contig = Contiguous();
-        return contig.Reshape(newShape);
+        RecordViewOpIfNeeded(AutogradOp.Reshape, result, 0, 0, 0);
+        return result;
     }
 
     public Tensor<T> Contiguous()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        Tensor<T> result;
         if (IsContiguous && _elementOffset == 0)
         {
             _memory.AddRef();
-            return new Tensor<T>(_memory, _shape, _strides, 0);
+            result = new Tensor<T>(_memory, _shape, _strides, 0);
+        }
+        else
+        {
+            result = new Tensor<T>(_shape);
+            CopyElements(this, result);
         }
 
-        var result = new Tensor<T>(_shape);
-        CopyElements(this, result);
+        RecordViewOpIfNeeded(AutogradOp.Contiguous, result, 0, 0, 0);
         return result;
     }
 
@@ -221,7 +237,62 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         ObjectDisposedException.ThrowIf(_disposed, this);
         var clone = new Tensor<T>(_shape);
         CopyElements(this, clone);
+        RecordViewOpIfNeeded(AutogradOp.Contiguous, clone, 0, 0, 0);
         return clone;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void RecordViewOpIfNeeded(AutogradOp op, Tensor<T> output, int p0, int p1, int p2)
+    {
+        if (typeof(T) == typeof(float) && _requiresGrad)
+        {
+            output._requiresGrad = true;
+            if (AutogradTape.Current is { IsExecutingBackward: false } tape)
+            {
+                Tensor<T> self = this;
+                var floatIn = Unsafe.As<Tensor<T>, Tensor<float>>(ref self);
+                var floatOut = Unsafe.As<Tensor<T>, Tensor<float>>(ref output);
+                tape.Record(new TapeEntry(op, floatOut, floatIn, intParam0: p0, intParam1: p1, intParam2: p2));
+            }
+        }
+    }
+
+    private static void CopyElementsToFlatSpan(Tensor<T> src, Span<T> dst)
+    {
+        int rank = src.Rank;
+        if (rank == 1)
+        {
+            int n = src.Shape[0];
+            for (int i = 0; i < n; i++) dst[i] = src[i];
+        }
+        else if (rank == 2)
+        {
+            int rows = src.Shape[0];
+            int cols = src.Shape[1];
+            int idx = 0;
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                {
+                    dst[idx++] = src[r, c];
+                }
+            }
+        }
+        else
+        {
+            Span<int> indices = stackalloc int[rank];
+            int count = (int)src.ElementCount;
+            for (int i = 0; i < count; i++)
+            {
+                dst[i] = src[indices];
+                for (int d = rank - 1; d >= 0; d--)
+                {
+                    indices[d]++;
+                    if (indices[d] < src.Shape[d]) break;
+                    indices[d] = 0;
+                }
+            }
+        }
     }
 
     private static void CopyElements(Tensor<T> src, Tensor<T> dst)
@@ -295,8 +366,14 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     public T[] ToArray()
     {
         var arr = new T[ElementCount];
-        using var contig = Contiguous();
-        contig.AsSpan().CopyTo(arr);
+        if (IsContiguous)
+        {
+            AsSpan().CopyTo(arr);
+        }
+        else
+        {
+            CopyElementsToFlatSpan(this, arr.AsSpan());
+        }
         return arr;
     }
 
@@ -333,7 +410,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_devicePointer != IntPtr.Zero) return true;
-        if (!CuDriver.IsAvailable()) return false;
+        if (!GpuAccelerator.BindNvidiaContext()) return false;
         return AllocateDeviceMemoryCore();
     }
 
@@ -351,6 +428,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     public bool CopyToDevice(IntPtr stream = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!GpuAccelerator.BindNvidiaContext()) return false;
         if (_devicePointer == IntPtr.Zero && !AllocateDeviceMemory())
             return false;
         return CopyToDeviceCore(stream);
@@ -380,7 +458,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_devicePointer == IntPtr.Zero) return false;
-        if (!CuDriver.IsAvailable()) return false;
+        if (!GpuAccelerator.BindNvidiaContext()) return false;
         return CopyToHostCore(stream);
     }
 
@@ -417,7 +495,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     {
         if (_devicePointer != IntPtr.Zero)
         {
-            if (CuDriver.IsAvailable())
+            if (GpuAccelerator.BindNvidiaContext())
             {
                 CuDriver.MemFree(_devicePointer);
             }

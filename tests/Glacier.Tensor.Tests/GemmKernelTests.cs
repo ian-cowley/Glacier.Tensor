@@ -81,8 +81,8 @@ public class GemmKernelTests
             TensorConcurrency.MaxDegreeOfParallelism = 4;
             Assert.Equal(Math.Min(4, Environment.ProcessorCount), TensorConcurrency.GetEffectiveParallelism());
 
-            // Explicit argument overrides ambient setting
-            Assert.Equal(2, TensorConcurrency.GetEffectiveParallelism(requested: 2));
+            // Explicit argument overrides ambient setting (clamped to processor count)
+            Assert.Equal(Math.Min(2, Environment.ProcessorCount), TensorConcurrency.GetEffectiveParallelism(requested: 2));
 
             TensorConcurrency.MaxDegreeOfParallelism = -1; // Conservative
             Assert.Equal(Math.Max(1, Environment.ProcessorCount - 2), TensorConcurrency.GetEffectiveParallelism());

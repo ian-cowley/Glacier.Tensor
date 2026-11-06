@@ -1,5 +1,7 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Threading;
 using Glacier.Tensor.Core;
 using Glacier.Tensor.Diagnostics;
@@ -206,6 +208,25 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                     return false;
                 }
 
+                return InitializeWindowsCore();
+            }
+            catch (Exception ex)
+            {
+                s_available = false;
+                s_initialized = true;
+                RecordError(D3D12ExecutionStage.Initialization, ex);
+                return false;
+            }
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool InitializeWindowsCore()
+    {
+        {
+            try
+            {
                 s_factory = DXGI.CreateDXGIFactory1<IDXGIFactory4>();
                 IDXGIAdapter1? chosenAdapter = null;
                 nuint maxVram = 0;

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Glacier.Tensor.Autograd;
 using Glacier.Tensor.Core;
 
 namespace Glacier.Tensor.Layers;
@@ -31,10 +32,16 @@ public sealed class Sequential : ILayer
     public Tensor<float> Forward(Tensor<float> input)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        bool releaseIntermediates = AutogradTape.Current == null;
         var current = input;
         for (int i = 0; i < _layers.Count; i++)
         {
-            current = _layers[i].Forward(current);
+            var next = _layers[i].Forward(current);
+            if (releaseIntermediates && i > 0 && !ReferenceEquals(current, next))
+            {
+                current.Dispose();
+            }
+            current = next;
         }
         return current;
     }

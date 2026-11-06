@@ -27,6 +27,7 @@ public sealed class CudaExecutionContext : IDisposable
 
     private CudaExecutionContext()
     {
+        GpuAccelerator.BindNvidiaContext();
         int res = CuDriver.StreamCreate(out IntPtr stream, 0);
         if (res != 0)
         {
@@ -37,6 +38,7 @@ public sealed class CudaExecutionContext : IDisposable
 
     public static CudaExecutionContext Rent()
     {
+        GpuAccelerator.BindNvidiaContext();
         while (s_pool.TryDequeue(out var ctx))
         {
             Interlocked.Decrement(ref s_poolCount);
@@ -68,6 +70,7 @@ public sealed class CudaExecutionContext : IDisposable
     {
         if (requiredBytes > CapA)
         {
+            GpuAccelerator.BindNvidiaContext();
             nuint allocBytes = Math.Max(requiredBytes, (nuint)(CapA * 1.5));
             if (allocBytes < requiredBytes) allocBytes = requiredBytes;
 
@@ -95,6 +98,7 @@ public sealed class CudaExecutionContext : IDisposable
     {
         if (requiredBytes > CapB)
         {
+            GpuAccelerator.BindNvidiaContext();
             nuint allocBytes = Math.Max(requiredBytes, (nuint)(CapB * 1.5));
             if (allocBytes < requiredBytes) allocBytes = requiredBytes;
 
@@ -122,6 +126,7 @@ public sealed class CudaExecutionContext : IDisposable
     {
         if (requiredBytes > CapC)
         {
+            GpuAccelerator.BindNvidiaContext();
             nuint allocBytes = Math.Max(requiredBytes, (nuint)(CapC * 1.5));
             if (allocBytes < requiredBytes) allocBytes = requiredBytes;
 
@@ -150,6 +155,7 @@ public sealed class CudaExecutionContext : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        GpuAccelerator.BindNvidiaContext();
         if (DevA != IntPtr.Zero)
         {
             CuDriver.MemFree(DevA);

@@ -7,6 +7,7 @@ namespace Glacier.Tensor.Core;
 
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.Versioning;
 using System.Threading;
 using Glacier.Gpu.Common;
 using Glacier.Gpu.Drivers;
@@ -117,7 +118,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
         var strides = Shape8.ComputeContiguousStrides(sh);
 
         GpuBuffer<T> buffer;
-        if (CuDriver.IsAvailable())
+        if (GpuAccelerator.BindNvidiaContext())
         {
             buffer = GpuBuffer<T>.AllocateCuda((int)sh.ElementCount);
         }
@@ -138,12 +139,14 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// </summary>
     public static DeviceResidentTensor<T> AllocateCuda(params ReadOnlySpan<int> shape)
     {
+        GpuAccelerator.BindNvidiaContext();
         var sh = new Shape8(shape);
         var strides = Shape8.ComputeContiguousStrides(sh);
         var buffer = GpuBuffer<T>.AllocateCuda((int)sh.ElementCount);
         return new DeviceResidentTensor<T>(buffer, sh, strides, 0);
     }
 
+    [SupportedOSPlatform("windows")]
     public static DeviceResidentTensor<T> AllocateD3D12(ID3D12Device device, ReadOnlySpan<int> shape, ResourceFlags flags = ResourceFlags.AllowUnorderedAccess)
     {
         var sh = new Shape8(shape);
@@ -155,6 +158,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// <summary>
     /// Allocates an uninitialized device-resident tensor on a Direct3D 12 device default heap.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     public static DeviceResidentTensor<T> AllocateD3D12(ID3D12Device device, params int[] shape)
         => AllocateD3D12(device, shape.AsSpan(), ResourceFlags.AllowUnorderedAccess);
 

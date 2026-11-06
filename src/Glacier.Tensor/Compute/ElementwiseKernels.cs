@@ -151,6 +151,9 @@ public static unsafe class ElementwiseKernels
     public static void Softmax(Tensor<float> input, Tensor<float> output, int dim = -1)
     {
         if (dim < 0) dim += input.Rank;
+        if ((uint)dim >= (uint)input.Rank)
+            throw new ArgumentOutOfRangeException(nameof(dim));
+
         using var inC = input.Contiguous();
         using var outC = output.Contiguous();
 
@@ -160,24 +163,22 @@ public static unsafe class ElementwiseKernels
         int inner = 1;
         for (int i = dim + 1; i < inC.Rank; i++) inner *= inC.Shape[i];
 
+        float* pIn = inC.DataPointer;
+        float* pOut = outC.DataPointer;
+
         if (inner == 1)
         {
-            float* pIn = inC.DataPointer;
-            float* pOut = outC.DataPointer;
-
             for (int r = 0; r < rows; r++)
             {
                 float* rowIn = pIn + (long)r * cols;
                 float* rowOut = pOut + (long)r * cols;
 
-                // Find max for numerical stability
                 float maxVal = rowIn[0];
                 for (int c = 1; c < cols; c++)
                 {
                     if (rowIn[c] > maxVal) maxVal = rowIn[c];
                 }
 
-                // Compute exp and sum
                 float sumExp = 0.0f;
                 for (int c = 0; c < cols; c++)
                 {
@@ -186,7 +187,6 @@ public static unsafe class ElementwiseKernels
                     sumExp += e;
                 }
 
-                // Normalize
                 float invSum = 1.0f / sumExp;
                 for (int c = 0; c < cols; c++)
                 {
@@ -196,13 +196,252 @@ public static unsafe class ElementwiseKernels
         }
         else
         {
-            // Fallback general softmax
-            throw new NotSupportedException("Arbitrary inner dimension softmax is not yet implemented.");
+            long outerStride = (long)cols * inner;
+            for (int r = 0; r < rows; r++)
+            {
+                long baseOffset = r * outerStride;
+                for (int k = 0; k < inner; k++)
+                {
+                    long offset = baseOffset + k;
+                    float maxVal = pIn[offset];
+                    for (int c = 1; c < cols; c++)
+                    {
+                        float val = pIn[offset + (long)c * inner];
+                        if (val > maxVal) maxVal = val;
+                    }
+
+                    float sumExp = 0.0f;
+                    for (int c = 0; c < cols; c++)
+                    {
+                        long idx = offset + (long)c * inner;
+                        float e = MathF.Exp(pIn[idx] - maxVal);
+                        pOut[idx] = e;
+                        sumExp += e;
+                    }
+
+                    float invSum = 1.0f / sumExp;
+                    for (int c = 0; c < cols; c++)
+                    {
+                        pOut[offset + (long)c * inner] *= invSum;
+                    }
+                }
+            }
         }
 
         if (!ReferenceEquals(output, outC))
         {
             outC.AsSpan().CopyTo(output.AsSpan());
+        }
+    }
+
+    public static void SoftmaxBackward(
+        Tensor<float> gradOutput,
+        Tensor<float> softmaxOutput,
+        Tensor<float> gradInput,
+        int dim = -1)
+    {
+        if (dim < 0) dim += softmaxOutput.Rank;
+        if ((uint)dim >= (uint)softmaxOutput.Rank)
+            throw new ArgumentOutOfRangeException(nameof(dim));
+
+        using var goC = gradOutput.Contiguous();
+        using var yC = softmaxOutput.Contiguous();
+        using var giC = gradInput.Contiguous();
+
+        int rows = 1;
+        for (int i = 0; i < dim; i++) rows *= yC.Shape[i];
+        int cols = yC.Shape[dim];
+        int inner = 1;
+        for (int i = dim + 1; i < yC.Rank; i++) inner *= yC.Shape[i];
+
+        float* pGo = goC.DataPointer;
+        float* pY = yC.DataPointer;
+        float* pGi = giC.DataPointer;
+
+        if (inner == 1)
+        {
+            for (int r = 0; r < rows; r++)
+            {
+                long rowBase = (long)r * cols;
+                float dot = 0.0f;
+                for (int c = 0; c < cols; c++)
+                {
+                    dot += pGo[rowBase + c] * pY[rowBase + c];
+                }
+
+                for (int c = 0; c < cols; c++)
+                {
+                    long idx = rowBase + c;
+                    pGi[idx] = pY[idx] * (pGo[idx] - dot);
+                }
+            }
+        }
+        else
+        {
+            long outerStride = (long)cols * inner;
+            for (int r = 0; r < rows; r++)
+            {
+                long baseOffset = r * outerStride;
+                for (int k = 0; k < inner; k++)
+                {
+                    long offset = baseOffset + k;
+                    float dot = 0.0f;
+                    for (int c = 0; c < cols; c++)
+                    {
+                        long idx = offset + (long)c * inner;
+                        dot += pGo[idx] * pY[idx];
+                    }
+
+                    for (int c = 0; c < cols; c++)
+                    {
+                        long idx = offset + (long)c * inner;
+                        pGi[idx] = pY[idx] * (pGo[idx] - dot);
+                    }
+                }
+            }
+        }
+
+        if (!ReferenceEquals(gradInput, giC))
+        {
+            giC.AsSpan().CopyTo(gradInput.AsSpan());
+        }
+    }
+
+    public static void LayerNorm(
+        Tensor<float> input,
+        Tensor<float>? gamma,
+        Tensor<float>? beta,
+        Tensor<float> output,
+        float eps = 1e-5f)
+    {
+        using var inC = input.Contiguous();
+        using var outC = output.Contiguous();
+        using var gC = gamma?.Contiguous();
+        using var bC = beta?.Contiguous();
+
+        int d = inC.Shape[inC.Rank - 1];
+        int batch = (int)(inC.ElementCount / d);
+
+        var inSpan = inC.AsSpan();
+        var outSpan = outC.AsSpan();
+        Span<float> gSpan = gC != null ? gC.AsSpan() : default;
+        Span<float> bSpan = bC != null ? bC.AsSpan() : default;
+
+        for (int b = 0; b < batch; b++)
+        {
+            int offset = b * d;
+
+            float mean = 0f;
+            for (int i = 0; i < d; i++) mean += inSpan[offset + i];
+            mean /= d;
+
+            float var = 0f;
+            for (int i = 0; i < d; i++)
+            {
+                float diff = inSpan[offset + i] - mean;
+                var += diff * diff;
+            }
+            var /= d;
+            float invStd = 1.0f / MathF.Sqrt(var + eps);
+
+            for (int i = 0; i < d; i++)
+            {
+                float norm = (inSpan[offset + i] - mean) * invStd;
+                float scaled = gamma != null ? norm * gSpan[i] : norm;
+                outSpan[offset + i] = beta != null ? scaled + bSpan[i] : scaled;
+            }
+        }
+
+        if (!ReferenceEquals(output, outC))
+        {
+            outC.AsSpan().CopyTo(output.AsSpan());
+        }
+    }
+
+    public static void LayerNormBackward(
+        Tensor<float> gradOutput,
+        Tensor<float> input,
+        Tensor<float>? gamma,
+        Tensor<float> gradInput,
+        Tensor<float>? gradGamma,
+        Tensor<float>? gradBeta,
+        float eps = 1e-5f)
+    {
+        using var goC = gradOutput.Contiguous();
+        using var inC = input.Contiguous();
+        using var gC = gamma?.Contiguous();
+        using var giC = gradInput.Contiguous();
+        using var ggC = gradGamma?.Contiguous();
+        using var gbC = gradBeta?.Contiguous();
+
+        int d = inC.Shape[inC.Rank - 1];
+        int batch = (int)(inC.ElementCount / d);
+
+        var goSpan = goC.AsSpan();
+        var inSpan = inC.AsSpan();
+        Span<float> gSpan = gC != null ? gC.AsSpan() : default;
+        var giSpan = giC.AsSpan();
+        Span<float> ggSpan = ggC != null ? ggC.AsSpan() : default;
+        Span<float> gbSpan = gbC != null ? gbC.AsSpan() : default;
+
+        if (gradGamma != null) ggSpan.Clear();
+        if (gradBeta != null) gbSpan.Clear();
+
+        float invD = 1.0f / d;
+
+        for (int b = 0; b < batch; b++)
+        {
+            int offset = b * d;
+
+            float mean = 0f;
+            for (int i = 0; i < d; i++) mean += inSpan[offset + i];
+            mean *= invD;
+
+            float var = 0f;
+            for (int i = 0; i < d; i++)
+            {
+                float diff = inSpan[offset + i] - mean;
+                var += diff * diff;
+            }
+            var *= invD;
+            float invStd = 1.0f / MathF.Sqrt(var + eps);
+
+            float sumDxHat = 0f;
+            float sumDxHatXHat = 0f;
+
+            for (int i = 0; i < d; i++)
+            {
+                float dy = goSpan[offset + i];
+                float xHat = (inSpan[offset + i] - mean) * invStd;
+                float g = gamma != null ? dy * gSpan[i] : dy;
+
+                sumDxHat += g;
+                sumDxHatXHat += g * xHat;
+
+                if (gradGamma != null) ggSpan[i] += dy * xHat;
+                if (gradBeta != null) gbSpan[i] += dy;
+            }
+
+            for (int i = 0; i < d; i++)
+            {
+                float dy = goSpan[offset + i];
+                float xHat = (inSpan[offset + i] - mean) * invStd;
+                float g = gamma != null ? dy * gSpan[i] : dy;
+                giSpan[offset + i] = invStd * (g - invD * sumDxHat - invD * xHat * sumDxHatXHat);
+            }
+        }
+
+        if (!ReferenceEquals(gradInput, giC))
+        {
+            giC.AsSpan().CopyTo(gradInput.AsSpan());
+        }
+        if (gradGamma != null && !ReferenceEquals(gradGamma, ggC))
+        {
+            ggC!.AsSpan().CopyTo(gradGamma.AsSpan());
+        }
+        if (gradBeta != null && !ReferenceEquals(gradBeta, gbC))
+        {
+            gbC!.AsSpan().CopyTo(gradBeta.AsSpan());
         }
     }
 
@@ -342,7 +581,6 @@ public static unsafe class ElementwiseKernels
         {
             int offset = b * d;
 
-            // 1. Compute rms
             float sumSq = 0.0f;
             for (int i = 0; i < d; i++)
             {
@@ -352,7 +590,6 @@ public static unsafe class ElementwiseKernels
             float rms = MathF.Sqrt(sumSq / d + eps);
             float invRms = 1.0f / rms;
 
-            // 2. Compute dot product of (dY * w) with xHat
             float dotGAndXHat = 0.0f;
             for (int i = 0; i < d; i++)
             {
@@ -368,7 +605,6 @@ public static unsafe class ElementwiseKernels
                 }
             }
 
-            // 3. Compute dx: dx_i = invRms * (g_i - (xHat_i / d) * dotGAndXHat)
             for (int i = 0; i < d; i++)
             {
                 float dy = goSpan[offset + i];

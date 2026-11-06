@@ -54,6 +54,34 @@ public static unsafe partial class GpuAccelerator
     public static bool HasVulkan => VulkanGemmKernel.IsSupported;
     public static IGpuEngine? Engine => s_gpuEngine.Value;
 
+    static GpuAccelerator()
+    {
+        AppDomain.CurrentDomain.ProcessExit += static (_, _) =>
+        {
+            if (s_gpuEngine.IsValueCreated)
+            {
+                try
+                {
+                    s_gpuEngine.Value?.Dispose();
+                }
+                catch
+                {
+                }
+            }
+        };
+    }
+
+    internal static bool BindNvidiaContext()
+    {
+        if (!EnsureNvidiaInitialized() || s_cuContext == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        CuDriver.CtxSetCurrent(s_cuContext);
+        return true;
+    }
+
     #region Driver Initialization
 
     private static bool EnsureNvidiaInitialized()
@@ -99,13 +127,16 @@ public static unsafe partial class GpuAccelerator
         string arch = CuDriver.GetComputeCapability(dev);
 
         // If GpuAccelerator.Engine already has an active NvidiaSassEngine, reuse its context!
-        if (s_gpuEngine.Value is HeterogeneousEngine het && het.Nvidia is { IsInitialized: true } nvHet)
+        if (s_gpuEngine.IsValueCreated)
         {
-            s_cuContext = nvHet.ContextHandle;
-        }
-        else if (s_gpuEngine.Value is NvidiaSassEngine nvEng && nvEng.IsInitialized)
-        {
-            s_cuContext = nvEng.ContextHandle;
+            if (s_gpuEngine.Value is HeterogeneousEngine het && het.Nvidia is { IsInitialized: true } nvHet)
+            {
+                s_cuContext = nvHet.ContextHandle;
+            }
+            else if (s_gpuEngine.Value is NvidiaSassEngine nvEng && nvEng.IsInitialized)
+            {
+                s_cuContext = nvEng.ContextHandle;
+            }
         }
 
         if (s_cuContext == IntPtr.Zero)
@@ -586,19 +617,19 @@ public static unsafe partial class GpuAccelerator
     /// </summary>
     public static bool ExecuteDualGpuGemm(Tensor<float> a, Tensor<float> b, Tensor<float> c)
     {
+        int M = a.Shape[0];
+        if (M < 32)
+            return false;
+
         bool hasNv = EnsureNvidiaInitialized();
-        bool hasSecondGpu = (OperatingSystem.IsWindows() && D3D12GemmKernel.IsSupported) ||
-                            VulkanGemmKernel.IsSupported ||
-                            EnsureAmdInitialized();
+        bool hasDistinctD3D12 = OperatingSystem.IsWindows() &&
+                                D3D12GemmKernel.IsSupported &&
+                                !D3D12GemmKernel.DeviceName.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase);
+        bool hasSecondGpu = hasDistinctD3D12 || EnsureAmdInitialized();
 
         if (!hasNv || !hasSecondGpu)
             return false;
 
-        int M = a.Shape[0];
-        int K = a.Shape[1];
-        int N = b.Shape[1];
-
-        // Split M dimension: 70% to discrete NVIDIA RTX 4060, 30% to integrated AMD 890M / secondary GPU
         int mNv = (int)(M * 0.70);
         mNv = Math.Clamp((mNv / 16) * 16, 16, M - 16);
         int mAmd = M - mNv;

@@ -6,13 +6,13 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>preview</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <TieredPGO>true</TieredPGO>
-    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <IsAotCompatible>true</IsAotCompatible>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <NoWarn>$(NoWarn);CS1591;CS8981</NoWarn>
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Tensor</PackageId>
-    <Version>1.0.9</Version>
+    <Version>1.1.0</Version>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
     <Description>Pure C# N-dimensional strided tensor engine and zero-allocation autograd framework for .NET 10. Native alternative to TensorFlow and PyTorch with cache-blocked AVX-512 GEMM, Glacier.Compute distributed ring AllReduce (NCCL alternative), and Polaris DataFrame zero-copy ingestion.</Description>
@@ -29,16 +29,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Glacier.Compute" Version="1.0.0" />
-    <PackageReference Include="Glacier.Polaris" Version="1.0.20" />
+    <PackageReference Include="Glacier.Compute" Version="1.1.0" />
+    <PackageReference Include="Glacier.Gpu" Version="1.1.0" />
+    <PackageReference Include="Glacier.Polaris" Version="1.1.0" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
-  </ItemGroup>
-
-  <ItemGroup Condition="Exists('..\..\..\Glacier.Gpu\src\Glacier.Gpu\Glacier.Gpu.csproj')">
-    <ProjectReference Include="..\..\..\Glacier.Gpu\src\Glacier.Gpu\Glacier.Gpu.csproj" />
-  </ItemGroup>
-  <ItemGroup Condition="!Exists('..\..\..\Glacier.Gpu\src\Glacier.Gpu\Glacier.Gpu.csproj')">
-    <PackageReference Include="Glacier.Gpu" Version="1.0.9" />
   </ItemGroup>
 </Project>

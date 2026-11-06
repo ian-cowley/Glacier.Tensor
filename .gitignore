@@ -2,6 +2,7 @@
 [Bb]in/
 [Oo]bj/
 [Rr]elease/
+TestResults/
 
 # IDE and editor folders
 .vs/
@@ -33,6 +34,11 @@ ncrunch*
 # OS files
 Thumbs.db
 .DS_Store
+
+# Secrets & local configuration
+appsettings*.json
+!appsettings.template.json
+*.env*
 
 # Scratch / working directories
 brain/
