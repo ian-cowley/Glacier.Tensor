@@ -158,4 +158,58 @@ public class AutogradTrainingTests
         Assert.True(finalLoss < 0.15f,
             $"Final loss should be < 0.15, was {finalLoss:F4}");
     }
+
+    [Fact]
+    public void CrossEntropy_LargeMargin_AvoidsSoftmaxCollapseAndCancellation()
+    {
+        double expected = 2.0 * Math.Exp(-40.0);
+
+        // 1. Class-index targets
+        using (var logits = Tensor<float>.FromArray([40f, 0f, 0f], 1, 3))
+        using (var targets = Tensor<float>.FromArray([0f], 1))
+        {
+            using var tape = new AutogradTape();
+            tape.Watch(logits);
+            var (lossVal, lossTensor) = LossFunctions.CrossEntropy(logits, targets);
+            tape.Backward(lossTensor);
+
+            Assert.True(lossVal > 0f && float.IsFinite(lossVal), $"Class-index loss collapsed: {lossVal}");
+            Assert.True(Math.Abs(lossVal - expected) / expected < 1e-4, $"Loss {lossVal} != {expected}");
+            Assert.NotNull(logits.Grad);
+            Assert.True(logits.Grad![0, 0] < 0f && Math.Abs(logits.Grad[0, 0] + expected) / expected < 1e-4,
+                $"Grad[0,0] {logits.Grad[0, 0]} != {-expected}");
+        }
+
+        // 2. One-hot targets
+        using (var logits = Tensor<float>.FromArray([40f, 0f, 0f], 1, 3))
+        using (var targets = Tensor<float>.FromArray([1f, 0f, 0f], 1, 3))
+        {
+            using var tape = new AutogradTape();
+            tape.Watch(logits);
+            var (lossVal, lossTensor) = LossFunctions.CrossEntropy(logits, targets);
+            tape.Backward(lossTensor);
+
+            Assert.True(lossVal > 0f && float.IsFinite(lossVal), $"One-hot loss collapsed: {lossVal}");
+            Assert.True(Math.Abs(lossVal - expected) / expected < 1e-4, $"Loss {lossVal} != {expected}");
+            Assert.NotNull(logits.Grad);
+            Assert.True(logits.Grad![0, 0] < 0f && Math.Abs(logits.Grad[0, 0] + expected) / expected < 1e-4,
+                $"Grad[0,0] {logits.Grad[0, 0]} != {-expected}");
+        }
+
+        // 3. CategoricalCrossEntropyLoss (labelSmoothing = 0)
+        using (var logits = Tensor<float>.FromArray([40f, 0f, 0f], 1, 3))
+        using (var targets = Tensor<float>.FromArray([1f, 0f, 0f], 1, 3))
+        {
+            using var tape = new AutogradTape();
+            tape.Watch(logits);
+            var (lossVal, lossTensor) = LossFunctions.CategoricalCrossEntropyLoss(logits, targets, labelSmoothing: 0.0f);
+            tape.Backward(lossTensor);
+
+            Assert.True(lossVal > 0f && float.IsFinite(lossVal), $"CategoricalCE loss collapsed: {lossVal}");
+            Assert.True(Math.Abs(lossVal - expected) / expected < 1e-4, $"Loss {lossVal} != {expected}");
+            Assert.NotNull(logits.Grad);
+            Assert.True(logits.Grad![0, 0] < 0f && Math.Abs(logits.Grad[0, 0] + expected) / expected < 1e-4,
+                $"Grad[0,0] {logits.Grad[0, 0]} != {-expected}");
+        }
+    }
 }

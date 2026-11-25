@@ -151,6 +151,40 @@ public static class LossFunctions
         }
     }
 
+    private static double Log1p(double x)
+    {
+        if (x == 0.0) return 0.0;
+        double u = 1.0 + x;
+        if (u == 1.0) return x;
+        return Math.Log(u) * (x / (u - 1.0));
+    }
+
+    private static void ComputeSplitSumSoftmaxStats(
+        ReadOnlySpan<float> rowLogits,
+        out double maxLogit,
+        out int argMax,
+        out double sumOther)
+    {
+        argMax = 0;
+        maxLogit = rowLogits[0];
+        for (int c = 1; c < rowLogits.Length; c++)
+        {
+            float v = rowLogits[c];
+            if (v > maxLogit)
+            {
+                maxLogit = v;
+                argMax = c;
+            }
+        }
+
+        sumOther = 0.0;
+        for (int c = 0; c < rowLogits.Length; c++)
+        {
+            if (c != argMax)
+                sumOther += Math.Exp((double)rowLogits[c] - maxLogit);
+        }
+    }
+
     /// <summary>
     /// Computes multi-class categorical cross-entropy loss with fused numerical-stable softmax.
     /// Supports one-hot targets of shape [B, C] or class index targets of shape [B] or [B, 1].
@@ -170,35 +204,26 @@ public static class LossFunctions
         var tgtSpan = (tContig ?? targets).AsSpan();
         bool isOneHot = targets.ElementCount == (long)batch * classes;
 
-        float totalLoss = 0f;
-        const float eps = 1e-12f;
+        double totalLoss = 0.0;
 
         for (int b = 0; b < batch; b++)
         {
             int offset = b * classes;
-
-            float maxLogit = logSpan[offset];
-            for (int c = 1; c < classes; c++)
-            {
-                if (logSpan[offset + c] > maxLogit)
-                    maxLogit = logSpan[offset + c];
-            }
-
-            float sumExp = 0f;
-            for (int c = 0; c < classes; c++)
-            {
-                sumExp += MathF.Exp(logSpan[offset + c] - maxLogit);
-            }
+            ReadOnlySpan<float> rowLogits = logSpan.Slice(offset, classes);
+            ComputeSplitSumSoftmaxStats(rowLogits, out double maxLogit, out int argMax, out double sumOther);
+            double logZOffset = Log1p(sumOther);
 
             if (isOneHot)
             {
                 for (int c = 0; c < classes; c++)
                 {
-                    float y = tgtSpan[offset + c];
-                    if (y > 0f)
+                    double y = tgtSpan[offset + c];
+                    if (y > 0.0)
                     {
-                        float p = MathF.Exp(logSpan[offset + c] - maxLogit) / sumExp;
-                        totalLoss -= y * MathF.Log(MathF.Max(p, eps));
+                        double negLogP = (c == argMax)
+                            ? logZOffset
+                            : (logZOffset + (maxLogit - (double)rowLogits[c]));
+                        totalLoss += y * negLogP;
                     }
                 }
             }
@@ -207,16 +232,18 @@ public static class LossFunctions
                 int targetClass = (int)tgtSpan[b];
                 if (targetClass >= 0 && targetClass < classes)
                 {
-                    float p = MathF.Exp(logSpan[offset + targetClass] - maxLogit) / sumExp;
-                    totalLoss -= MathF.Log(MathF.Max(p, eps));
+                    double negLogP = (targetClass == argMax)
+                        ? logZOffset
+                        : (logZOffset + (maxLogit - (double)rowLogits[targetClass]));
+                    totalLoss += negLogP;
                 }
             }
         }
 
-        totalLoss /= batch;
+        float meanLoss = (float)(totalLoss / batch);
 
         var lossTensor = new Tensor<float>(1);
-        lossTensor.AsSpan()[0] = totalLoss;
+        lossTensor.AsSpan()[0] = meanLoss;
         lossTensor.RequiresGrad = logits.RequiresGrad;
 
         if (AutogradTape.Current is { IsExecutingBackward: false } tape)
@@ -228,7 +255,7 @@ public static class LossFunctions
             tape.Record(new TapeEntry(AutogradOp.CrossEntropyLoss, lossTensor, logits, targets));
         }
 
-        return (totalLoss, lossTensor);
+        return (meanLoss, lossTensor);
     }
 
     internal static void ComputeCrossEntropyGradient(
@@ -246,32 +273,24 @@ public static class LossFunctions
         var tgtSpan = (tContig ?? targets).AsSpan();
         var outSpan = gradOutput.AsSpan();
         bool isOneHot = targets.ElementCount == (long)batch * classes;
-        float scale = dLoss / batch;
+        double dScale = (double)dLoss / batch;
 
         for (int b = 0; b < batch; b++)
         {
             int offset = b * classes;
-
-            float maxLogit = logSpan[offset];
-            for (int c = 1; c < classes; c++)
-            {
-                if (logSpan[offset + c] > maxLogit)
-                    maxLogit = logSpan[offset + c];
-            }
-
-            float sumExp = 0f;
-            for (int c = 0; c < classes; c++)
-            {
-                sumExp += MathF.Exp(logSpan[offset + c] - maxLogit);
-            }
+            ReadOnlySpan<float> rowLogits = logSpan.Slice(offset, classes);
+            ComputeSplitSumSoftmaxStats(rowLogits, out double maxLogit, out int argMax, out double sumOther);
+            double invDenom = 1.0 / (1.0 + sumOther);
 
             int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
 
             for (int c = 0; c < classes; c++)
             {
-                float p = MathF.Exp(logSpan[offset + c] - maxLogit) / sumExp;
-                float y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0f : 0.0f);
-                outSpan[offset + c] = scale * (p - y);
+                double y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0 : 0.0);
+                double diff = (c == argMax)
+                    ? (((1.0 - y) - y * sumOther) * invDenom)
+                    : (Math.Exp((double)rowLogits[c] - maxLogit) * invDenom - y);
+                outSpan[offset + c] = (float)(dScale * diff);
             }
         }
     }
@@ -296,39 +315,32 @@ public static class LossFunctions
         var logSpan = (lContig ?? logits).AsSpan();
         var tgtSpan = (tContig ?? targets).AsSpan();
         bool isOneHot = targets.ElementCount == (long)batch * classes;
-        float totalLoss = 0f;
-        float smoothVal = labelSmoothing / classes;
+        double totalLoss = 0.0;
+        double smoothing = labelSmoothing;
+        double smoothVal = smoothing / classes;
 
         for (int b = 0; b < batch; b++)
         {
             int offset = b * classes;
-
-            float maxLogit = logSpan[offset];
-            for (int c = 1; c < classes; c++)
-            {
-                if (logSpan[offset + c] > maxLogit)
-                    maxLogit = logSpan[offset + c];
-            }
-
-            float sumExp = 0f;
-            for (int c = 0; c < classes; c++)
-            {
-                sumExp += MathF.Exp(logSpan[offset + c] - maxLogit);
-            }
-            float logSumExp = maxLogit + MathF.Log(sumExp);
+            ReadOnlySpan<float> rowLogits = logSpan.Slice(offset, classes);
+            ComputeSplitSumSoftmaxStats(rowLogits, out double maxLogit, out int argMax, out double sumOther);
+            double logZOffset = Log1p(sumOther);
 
             int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
             for (int c = 0; c < classes; c++)
             {
-                float y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0f : 0.0f);
-                float smoothedY = (1.0f - labelSmoothing) * y + smoothVal;
-                totalLoss += smoothedY * (logSumExp - logSpan[offset + c]);
+                double y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0 : 0.0);
+                double smoothedY = (1.0 - smoothing) * y + smoothVal;
+                double negLogP = (c == argMax)
+                    ? logZOffset
+                    : (logZOffset + (maxLogit - (double)rowLogits[c]));
+                totalLoss += smoothedY * negLogP;
             }
         }
 
-        totalLoss /= batch;
+        float meanLoss = (float)(totalLoss / batch);
         var lossTensor = new Tensor<float>(1);
-        lossTensor.AsSpan()[0] = totalLoss;
+        lossTensor.AsSpan()[0] = meanLoss;
         lossTensor.RequiresGrad = logits.RequiresGrad;
 
         if (AutogradTape.Current is { IsExecutingBackward: false } tape)
@@ -340,7 +352,7 @@ public static class LossFunctions
             tape.Record(new TapeEntry(AutogradOp.CategoricalCrossEntropyLoss, lossTensor, logits, targets, labelSmoothing));
         }
 
-        return (totalLoss, lossTensor);
+        return (meanLoss, lossTensor);
     }
 
     internal static void ComputeCategoricalCrossEntropyGradient(
@@ -360,28 +372,26 @@ public static class LossFunctions
         var tgtSpan = (tContig ?? targets).AsSpan();
         var outSpan = gradOutput.AsSpan();
         bool isOneHot = targets.ElementCount == (long)batch * classes;
-        float smoothVal = labelSmoothing / classes;
-        float scale = dLoss / batch;
+        double smoothing = labelSmoothing;
+        double smoothVal = smoothing / classes;
+        double dScale = (double)dLoss / batch;
 
         for (int b = 0; b < batch; b++)
         {
             int offset = b * classes;
-            float maxLogit = logSpan[offset];
-            for (int c = 1; c < classes; c++)
-            {
-                if (logSpan[offset + c] > maxLogit) maxLogit = logSpan[offset + c];
-            }
-
-            float sumExp = 0f;
-            for (int c = 0; c < classes; c++) sumExp += MathF.Exp(logSpan[offset + c] - maxLogit);
+            ReadOnlySpan<float> rowLogits = logSpan.Slice(offset, classes);
+            ComputeSplitSumSoftmaxStats(rowLogits, out double maxLogit, out int argMax, out double sumOther);
+            double invDenom = 1.0 / (1.0 + sumOther);
 
             int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
             for (int c = 0; c < classes; c++)
             {
-                float p = MathF.Exp(logSpan[offset + c] - maxLogit) / sumExp;
-                float y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0f : 0.0f);
-                float smoothedY = (1.0f - labelSmoothing) * y + smoothVal;
-                float grad = scale * (p - smoothedY);
+                double y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0 : 0.0);
+                double smoothedY = (1.0 - smoothing) * y + smoothVal;
+                double diff = (c == argMax)
+                    ? (((1.0 - smoothedY) - smoothedY * sumOther) * invDenom)
+                    : (Math.Exp((double)rowLogits[c] - maxLogit) * invDenom - smoothedY);
+                float grad = (float)(dScale * diff);
                 if (accumulate)
                     outSpan[offset + c] += grad;
                 else
