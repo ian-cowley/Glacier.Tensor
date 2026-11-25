@@ -107,10 +107,10 @@ public class D3D12GemmKernelTests
     [Fact]
     public void Execute_LogsErrorToGlacierDiagnostics()
     {
-        var loggedEntries = new List<(LogLevel Level, string Message, Exception? Ex)>();
+        var loggedEntries = new System.Collections.Concurrent.ConcurrentQueue<(LogLevel Level, string Message, Exception? Ex)>();
         GlacierDiagnostics.Logger = new DelegateGlacierLogger((level, msg, ex) =>
         {
-            loggedEntries.Add((level, msg, ex));
+            loggedEntries.Enqueue((level, msg, ex));
         });
 
         try
@@ -122,8 +122,9 @@ public class D3D12GemmKernelTests
             bool success = D3D12GemmKernel.Execute(a, b, c, out var diag);
             Assert.False(success);
 
-            Assert.NotEmpty(loggedEntries);
-            Assert.Contains(loggedEntries, e => e.Level == LogLevel.Error && e.Message.Contains("ArgumentValidation"));
+            var snapshot = loggedEntries.ToArray();
+            Assert.NotEmpty(snapshot);
+            Assert.Contains(snapshot, e => e.Level == LogLevel.Error && e.Message.Contains("ArgumentValidation"));
         }
         finally
         {
