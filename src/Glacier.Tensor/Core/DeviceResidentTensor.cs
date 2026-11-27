@@ -23,13 +23,19 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
 {
     private static int s_idCounter;
 
+    private sealed class BufferRefCount
+    {
+        public int Count = 1;
+    }
+
     private readonly GpuBuffer<T> _buffer;
+    private readonly BufferRefCount _refCount;
     private readonly Shape8 _shape;
     private readonly Shape8 _strides;
     private readonly long _elementOffset;
     private readonly bool _isContiguous;
     private readonly int _tensorId;
-    private bool _disposed;
+    private int _disposed;
 
     /// <summary>Gets the unique tensor identifier.</summary>
     public int TensorId => _tensorId;
@@ -56,7 +62,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     public GpuBuffer<T> Buffer => _buffer;
 
     /// <summary>Gets a value indicating whether this tensor has been disposed.</summary>
-    public bool IsDisposed => _disposed;
+    public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
     /// <summary>Gets the hardware GPU classification type.</summary>
     public GpuDeviceType DeviceType => _buffer.DeviceType;
@@ -67,7 +73,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
             return _buffer.DevicePointer == IntPtr.Zero
                 ? IntPtr.Zero
                 : _buffer.DevicePointer + (int)(_elementOffset * sizeof(T));
@@ -80,7 +86,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
             return _buffer.GpuVirtualAddress == 0
                 ? 0
                 : _buffer.GpuVirtualAddress + (ulong)(_elementOffset * sizeof(T));
@@ -91,8 +97,18 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// Initializes a new instance of the <see cref="DeviceResidentTensor{T}"/> class with explicit strides and offset.
     /// </summary>
     public DeviceResidentTensor(GpuBuffer<T> buffer, Shape8 shape, Shape8 strides, long elementOffset = 0)
+        : this(buffer, new BufferRefCount(), shape, strides, elementOffset, incrementRef: false)
+    {
+    }
+
+    private DeviceResidentTensor(GpuBuffer<T> buffer, BufferRefCount refCount, Shape8 shape, Shape8 strides, long elementOffset, bool incrementRef)
     {
         _buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
+        _refCount = refCount ?? throw new ArgumentNullException(nameof(refCount));
+        if (incrementRef)
+        {
+            Interlocked.Increment(ref _refCount.Count);
+        }
         _shape = shape;
         _strides = strides;
         _elementOffset = elementOffset;
@@ -191,7 +207,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// </summary>
     public void DownloadTo(Tensor<T> destination, IntPtr stream = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentNullException.ThrowIfNull(destination, nameof(destination));
         if (destination.ElementCount != ElementCount)
             throw new ArgumentException($"Destination tensor element count ({destination.ElementCount}) does not match device tensor ({ElementCount}).");
@@ -216,13 +232,13 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// </summary>
     public DeviceResidentTensor<T> View(in Shape8 newShape)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         if (!_isContiguous)
             throw new InvalidOperationException("Cannot reshape a non-contiguous device-resident tensor view.");
         if (newShape.ElementCount != ElementCount)
             throw new ArgumentException($"Cannot reshape tensor with {ElementCount} elements to shape with {newShape.ElementCount} elements.");
 
-        return new DeviceResidentTensor<T>(_buffer, newShape, Shape8.ComputeContiguousStrides(newShape), _elementOffset);
+        return new DeviceResidentTensor<T>(_buffer, _refCount, newShape, Shape8.ComputeContiguousStrides(newShape), _elementOffset, incrementRef: true);
     }
 
     /// <summary>
@@ -230,7 +246,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// </summary>
     public DeviceResidentTensor<T> Slice(int dimension, int start, int length)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         if ((uint)dimension >= (uint)_shape.Rank)
             throw new ArgumentOutOfRangeException(nameof(dimension));
         if (start < 0 || length < 0 || (long)start + length > _shape[dimension])
@@ -242,7 +258,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
 
         long newOffset = _elementOffset + (long)start * _strides[dimension];
         var newShape = new Shape8(newDims);
-        return new DeviceResidentTensor<T>(_buffer, newShape, _strides, newOffset);
+        return new DeviceResidentTensor<T>(_buffer, _refCount, newShape, _strides, newOffset, incrementRef: true);
     }
 
     /// <summary>
@@ -251,7 +267,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// </summary>
     public DeviceResidentTensor<float> MatMul(DeviceResidentTensor<float> other, DeviceResidentTensor<float>? destination = null, IntPtr stream = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentNullException.ThrowIfNull(other, nameof(other));
         ObjectDisposedException.ThrowIf(other.IsDisposed, other);
 
@@ -300,10 +316,12 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// <inheritdoc/>
     public void Dispose()
     {
-        if (!_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            _disposed = true;
-            _buffer.Dispose();
+            if (Interlocked.Decrement(ref _refCount.Count) == 0)
+            {
+                _buffer.Dispose();
+            }
         }
     }
 

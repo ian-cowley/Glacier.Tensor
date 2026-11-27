@@ -57,6 +57,7 @@ public sealed class AutogradTape : IDisposable
 
         bool prevBackward = IsExecutingBackward;
         IsExecutingBackward = true;
+        HashSet<Tensor<float>>? clearedLossInputs = null;
         try
         {
             // Reverse topological traversal over tape entries
@@ -302,7 +303,7 @@ public sealed class AutogradTape : IDisposable
                             float dLoss = GetScalar(dY);
                             using var dPred = new Tensor<float>(pred.Shape);
                             Losses.LossFunctions.ComputeMSEGradient(pred, targets, dPred, dLoss);
-                            pred.Grad?.Fill(0.0f);
+                            ClearLossInputOnce(pred, ref clearedLossInputs);
                             AccumulateGradient(pred, dPred);
                         }
                         break;
@@ -317,7 +318,7 @@ public sealed class AutogradTape : IDisposable
                             float dLoss = GetScalar(dY);
                             using var dPred = new Tensor<float>(pred.Shape);
                             Losses.LossFunctions.ComputeBinaryCrossEntropyGradient(pred, targets, dPred, dLoss);
-                            pred.Grad?.Fill(0.0f);
+                            ClearLossInputOnce(pred, ref clearedLossInputs);
                             AccumulateGradient(pred, dPred);
                         }
                         break;
@@ -332,7 +333,7 @@ public sealed class AutogradTape : IDisposable
                             float dLoss = GetScalar(dY);
                             using var dLogits = new Tensor<float>(logits.Shape);
                             Losses.LossFunctions.ComputeCrossEntropyGradient(logits, targets, dLogits, dLoss);
-                            logits.Grad?.Fill(0.0f);
+                            ClearLossInputOnce(logits, ref clearedLossInputs);
                             AccumulateGradient(logits, dLogits);
                         }
                         break;
@@ -347,7 +348,7 @@ public sealed class AutogradTape : IDisposable
                             float dLoss = GetScalar(dY);
                             using var dLogits = new Tensor<float>(logits.Shape);
                             Losses.LossFunctions.ComputeCategoricalCrossEntropyGradient(logits, targets, dLogits, entry.Scalar, dLoss);
-                            logits.Grad?.Fill(0.0f);
+                            ClearLossInputOnce(logits, ref clearedLossInputs);
                             AccumulateGradient(logits, dLogits);
                         }
                         break;
@@ -362,7 +363,7 @@ public sealed class AutogradTape : IDisposable
                             float dLoss = GetScalar(dY);
                             using var dLogits = new Tensor<float>(logits.Shape);
                             Losses.LossFunctions.ComputeBrierScoreGradient(logits, targets, dLogits, dLoss);
-                            logits.Grad?.Fill(0.0f);
+                            ClearLossInputOnce(logits, ref clearedLossInputs);
                             AccumulateGradient(logits, dLogits);
                         }
                         break;
@@ -378,6 +379,15 @@ public sealed class AutogradTape : IDisposable
         if (!retainGraph)
         {
             _entries.Clear();
+        }
+    }
+
+    private static void ClearLossInputOnce(Tensor<float> tensor, ref HashSet<Tensor<float>>? cleared)
+    {
+        cleared ??= new HashSet<Tensor<float>>(ReferenceEqualityComparer.Instance);
+        if (cleared.Add(tensor))
+        {
+            tensor.Grad?.Fill(0.0f);
         }
     }
 

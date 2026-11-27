@@ -308,4 +308,30 @@ public class AutogradModernOpsTests
                 $"BrierScore dW mismatch at {idx}: analytical={anaGrad:F6}, numerical={numGrad:F6}");
         }
     }
+
+    [Fact]
+    public void Autograd_MultiLossOnSharedPredictions_AccumulatesBothGradients()
+    {
+        using var pred = Tensor<float>.FromArray([2.0f, 4.0f], 2);
+        using var targetA = Tensor<float>.FromArray([1.0f, 2.0f], 2);
+        using var targetB = Tensor<float>.FromArray([0.0f, 1.0f], 2);
+
+        using var tape = new AutogradTape();
+        tape.Watch(pred);
+
+        var (_, lossA) = LossFunctions.MSELoss(pred, targetA);
+        var (_, lossB) = LossFunctions.MSELoss(pred, targetB);
+        using var totalLoss = TensorOps.Add(lossA, lossB);
+        lossA.Dispose();
+        lossB.Dispose();
+
+        tape.Backward(totalLoss);
+
+        // d/dpred MSE(pred, targetA) = (pred - targetA) = [1.0, 2.0]
+        // d/dpred MSE(pred, targetB) = (pred - targetB) = [2.0, 3.0]
+        // Sum of both losses => [3.0, 5.0]
+        Assert.NotNull(pred.Grad);
+        Assert.Equal(3.0f, pred.Grad[0], 4);
+        Assert.Equal(5.0f, pred.Grad[1], 4);
+    }
 }

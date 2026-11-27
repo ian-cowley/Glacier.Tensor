@@ -12,7 +12,8 @@
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Tensor</PackageId>
-    <Version>1.1.1</Version>
+    <Version>1.1.2</Version>
+    <PackageReleaseNotes>v1.1.2: Gradient accumulation/refcount hardening and aligned Compute 1.1.1 / Gpu 1.2.1 / Polaris 1.2.6 dependencies.</PackageReleaseNotes>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
     <Description>Pure C# N-dimensional strided tensor engine and zero-allocation autograd framework for .NET 10. Native alternative to TensorFlow and PyTorch with cache-blocked AVX-512 GEMM, Glacier.Compute distributed ring AllReduce (NCCL alternative), and Polaris DataFrame zero-copy ingestion.</Description>
@@ -29,9 +30,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Glacier.Compute" Version="1.1.0" />
-    <PackageReference Include="Glacier.Gpu" Version="1.1.0" />
-    <PackageReference Include="Glacier.Polaris" Version="1.1.0" />
+    <PackageReference Include="Glacier.Compute" Version="1.1.1" />
+    <PackageReference Include="Glacier.Gpu" Version="1.2.1" />
+    <PackageReference Include="Glacier.Polaris" Version="1.2.6" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
   </ItemGroup>

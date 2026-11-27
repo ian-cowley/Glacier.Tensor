@@ -205,4 +205,32 @@ public class DeviceResidentTensorTests
 
         Assert.Throws<ArgumentException>(() => a.MatMul(b));
     }
+
+    [Fact]
+    public void SliceAndView_Dispose_DoesNotFreeSharedGpuBufferUntilAllDisposed()
+    {
+        int freeCount = 0;
+        var gpuBuf = new Glacier.Gpu.Common.GpuBuffer<float>(
+            new IntPtr(0x1234),
+            0x1234UL,
+            16,
+            GpuDeviceType.NvidiaDiscrete,
+            _ => Interlocked.Increment(ref freeCount));
+
+        var parent = new DeviceResidentTensor<float>(gpuBuf, new Shape8([4, 4]));
+        var slice = parent.Slice(0, 1, 2);
+        var view = parent.View(new Shape8([16]));
+
+        slice.Dispose();
+        Assert.Equal(0, freeCount);
+        Assert.False(gpuBuf.IsDisposed);
+
+        view.Dispose();
+        Assert.Equal(0, freeCount);
+        Assert.False(gpuBuf.IsDisposed);
+
+        parent.Dispose();
+        Assert.Equal(1, freeCount);
+        Assert.True(gpuBuf.IsDisposed);
+    }
 }
