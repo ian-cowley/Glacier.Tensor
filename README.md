@@ -1,146 +1,41 @@
 ![Glacier.Tensor Banner](assets/banner.jpg)
 
-# 🟧 Glacier.Tensor
+# Glacier.Tensor
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
 [![Native AOT](https://img.shields.io/badge/Native%20AOT-Ready-brightgreen.svg)](https://learn.microsoft.com/dotnet/core/deploying/native-aot/)
 [![NuGet Version](https://img.shields.io/nuget/v/Glacier.Tensor.svg)](https://www.nuget.org/packages/Glacier.Tensor/)
-[![Ecosystem](https://img.shields.io/badge/Glacier-Ecosystem-blue)](https://github.com/ian-cowley)
-[![Website](https://img.shields.io/badge/Website-glaciersoftware.dev-66fcf1.svg)](https://glaciersoftware.dev/)
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-orange.svg?logo=buy-me-a-coffee)](https://buymeacoffee.com/glaciersoftware)
 
-> **Pure C# N-Dimensional Strided Tensor Engine & Zero-Allocation Autograd Framework for .NET 10 (Systematically Beating Python TensorFlow & PyTorch)**
+`Glacier.Tensor` is an N-dimensional strided tensor, reverse-mode autograd, and neural-network kernel library written in pure C# for .NET 10.
 
-`Glacier.Tensor` is a high-performance deep learning and tensor computation engine designed from the ground up for C# .NET 10. It delivers zero-allocation reverse-mode automatic differentiation, cache-blocked SIMD GEMM matrix multiplication, and seamless hardware acceleration across DirectML, Vulkan, and ONNX Runtime. It serves as Pillar 3 of the unified **Glacier .NET 10 High-Performance Ecosystem**.
+It provides unmanaged 64-byte-aligned tensors with zero-copy slicing and transposition, an autograd tape with nested scope isolation, cache-blocked CPU SIMD GEMM, GPU matrix multiplication across CUDA, Direct3D 12, and Vulkan, plus built-in layers, losses, LoRA adapters, and optimizers with no Python or C++ runtime dependencies.
 
----
+## Install
 
-## 1. Why Glacier.Tensor? Replacing Python TensorFlow & PyTorch
-
-Deep learning in Python is dominated by **TensorFlow** and **PyTorch**. While their lower-level C++/CUDA backends are fast, the Python runtime environment introduces severe production friction:
-
-1. **Massive Deployment Bloat**: PyTorch/TensorFlow environments consume 4–8 GB of disk space and require fragile virtual environments with complex native library bindings.
-2. **Interpreter Autograd Overhead**: PyTorch's dynamic autograd tape incurs Python interpreter dispatch latency on every small tensor operation, creating massive bottlenecks during CPU-bound inference and small-batch processing.
-3. **Foreign Object Memory Isolation**: Transferring data between Pandas DataFrames and PyTorch Tensors requires memory copies or unsafe C++ pointer marshaling.
-
-**Glacier.Tensor** solves these issues with:
-- **`Tensor<T>` Strided Memory Representation**: Multi-dimensional strided tensor engine with zero-copy slicing, transpositions, and broadcasting over contiguous 64-byte aligned unmanaged memory blocks.
-- **Bare-Metal GPU & Ada Lovelace 4th-Gen Tensor Core Acceleration**: Direct driver P/Invoke (`nvcuda.dll` and `amdhip64.dll`) executing WMMA instructions (`wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32`) on NVIDIA RTX 4060 dGPU and AMD unified memory APUs with zero CUDA/ROCm SDK dependencies.
-- **Direct3D 12 & Universal Vulkan 1.3+ Compute**: Native DirectX 12 Compute and cross-platform Vulkan compute engines running 64x64 (`4x4` register-tiled) shared-memory GEMM kernels with double-buffered D3D12 staging/shader caching and `DEVICE_LOCAL` Vulkan VRAM staging. Accelerates AMD Radeon APUs (e.g., Radeon 890M / 780M) and discrete GPUs across Windows and Linux.
-- **Dynamic Hardware Target Dispatch (`GpuTarget`)**: Seamlessly routes operations across `GpuTarget.NvidiaTensorCore`, `GpuTarget.Nvidia`, `GpuTarget.Direct3D12`, `GpuTarget.Vulkan`, `GpuTarget.Amd`, `GpuTarget.DualGpu`, `GpuTarget.Cpu`, or `GpuTarget.Auto`.
-- **Cache-Blocked SIMD GEMM**: CPU matrix multiplication leveraging `Vector512<float>` (AVX-512 FMA) micro-kernels that achieve theoretical peak CPU floating-point throughput rivaling Intel MKL.
-- **Zero-Allocation Reverse-Mode Autograd Tape**: Pre-allocated contiguous operation tape avoiding heap allocations during forward and backward execution graphs.
-- **Micro-Footprint Native AOT Distribution**: Compiles complete deep learning neural network inference models into standalone, self-contained native executables under **28 MB**.
-
----
-
-## 2. Architecture & Memory Layout
-
-```
-                              Tensor<T> Strided Memory Layout
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│  Tensor<T> (where T : unmanaged, e.g. float, double, Half, BFloat16)                   │
-│  ├── Memory: NativeMemoryBlock<T> (Contiguous unmanaged pointer, 64-byte aligned)      │
-│  ├── Offset: long (Element offset to the first view element)                           │
-│  ├── Rank: int (Number of dimensions)                                                  │
-│  ├── Shape: ReadOnlySpan<int> (Dimensions: e.g. [32, 3, 224, 224])                     │
-│  ├── Strides: ReadOnlySpan<int> (Memory step per dimension: e.g. [150528, 50176, 224, 1])│
-│  └── IsContiguous: bool (Fast-path flag for direct SIMD contiguous vectorization)       │
-└────────────────────────────────────────────────────────────────────────────────────────┘
+```bash
+dotnet add package Glacier.Tensor
 ```
 
-### Autograd & Hardware Dispatch Flow
+## Quick Start
 
-```
-[ Input Tensors A & B ] ───> GpuAccelerator.AcceleratedMatMul(A, B, C, Target)
-                                   │
-         ┌─────────────────────────┼─────────────────────────┬─────────────────────────┐
-         ▼                         ▼                         ▼                         ▼
- [ NvidiaTensorCore ]     [ Direct3D 12 Compute ]    [ Vulkan 1.3 Compute ]    [ Multi-Core CPU ]
-  Ada Lovelace WMMA        AMD Radeon 890M APU        Universal Cross-Vendor    AVX-512 Blocked
-  4.72 TFLOPS (0.46 ms)    1.10 TFLOPS (1.95 ms)      SPIR-V Tiled Kernel       Dynamic Scaling
-```
-
-- **In-Place Gradient Accumulation**: Gradients write directly to unmanaged parameter buffers without allocating intermediary gradient tensor wrapper objects.
-- **Direct Polaris Ingestion**: Converts `Polaris.DataFrame` Arrow columns directly into contiguous tensors with zero copies.
-
----
-
-## 3. Measured Performance Benchmarks
-
-*Benchmarked on .NET 10.0: AMD Ryzen AI 9 HX 370 (Zen 5 AVX-512) + AMD Radeon 890M APU vs. NVIDIA GeForce RTX 4060 Laptop GPU (Ada Lovelace sm_89)*
-
-| Deep Learning Task | Workload Scope | PyTorch CPU (v2.x) | Glacier.Tensor (CPU AVX-512) | Glacier.Tensor (Radeon 890M D3D12) | Glacier.Tensor (RTX 4060 Resident) | Speedup vs PyTorch |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **GEMM Matrix Multiply** | $512 \times 512$ FP32 | 12 ms | **0.88 ms** | **0.69 ms** | **0.22 ms (1.22 TFLOPS)** | **54.5x** |
-| **GEMM Matrix Multiply** | $1024 \times 1024$ FP32 | 4.03 ms | **3.46 ms (0.62 TFLOPS)** | **1.79 ms (1.20 TFLOPS)** | **0.67 ms (3.23 TFLOPS, 3.63T peak)** | **6.0x vs PyTorch CPU** |
-| **GEMM Matrix Multiply** | $2048 \times 2048$ FP32 | ~380 ms | **34.2 ms (0.50 TFLOPS)** | **12.31 ms (1.40 TFLOPS)**| **3.28 ms (5.23 TFLOPS)** | **115.8x** |
-| **Qwen 2.5 7B LoRA (q_proj)** | $512 \times 3584$ ($r=16$) | ~340 ms | **32.7 ms (15,679 tok/s)** | — | **14.2 ms (36,056 tok/s)** | **23.9x** |
-| **ResNet-50 Forward Pass** | Batch size 1 (Inference) | 28 ms | 16.0 ms | **5.40 ms** | **2.80 ms** | **10.0x** |
-| **MLP Backward Pass** | 100k samples, 3 layers | 180 ms | 92.0 ms | **31.2 ms** | **18.5 ms** | **9.7x** |
-| **Distribution Package Size** | Self-contained binary | ~4.2 GB | **< 28 MB** | **< 28 MB** | **< 28 MB** | **> 150x smaller (Native AOT)** |
-
----
-
-## 4. Quickstart API
-
-```csharp
-using Glacier.Tensor;
-using Glacier.Tensor.Autograd;
-using Glacier.Tensor.Core;
-using Glacier.Tensor.Layers;
-using Glacier.Tensor.Losses;
-
-// Allocate 64-byte aligned tensors with shape [Batch, Features]
-using var x = Tensor<float>.FromSpan(new float[] { 1.0f, 2.0f, 3.0f, 4.0f }, shape: [2, 2]);
-using var targets = Tensor<float>.Ones(2, 1);
-using var weights = Tensor<float>.RandomNormal(shape: [2, 1], seed: 42);
-
-// Execute forward pass recording operations onto the zero-allocation tape
-using var tape = new AutogradTape();
-tape.Watch(weights);
-
-var hidden = TensorOps.MatMul(x, weights);
-var prediction = TensorOps.Sigmoid(hidden);
-var (_, loss) = LossFunctions.BinaryCrossEntropy(prediction, targets);
-
-// Backward pass executes in reverse topological order directly into parameter gradient buffers
-tape.Backward(loss);
-
-// Gradients are immediately available on unmanaged memory
-ReadOnlySpan<float> weightGrads = weights.Grad.AsSpan();
-```
-
-### 4.2 Bare-Metal Tensor Core Matrix Multiplication
-```csharp
-using Glacier.Tensor.Core;
-using Glacier.Tensor.Compute;
-
-using var a = new Tensor<float>(1024, 1024);
-using var b = new Tensor<float>(1024, 1024);
-using var c = new Tensor<float>(1024, 1024);
-
-// Executes on Ada Lovelace Tensor Cores in 1.63 ms (1.31 TFLOPS)
-GpuAccelerator.AcceleratedMatMul(a, b, c, GpuTarget.NvidiaTensorCore);
-
-// Or automatically route to fastest available hardware (dGPU, APU, or CPU)
-GpuAccelerator.AcceleratedMatMul(a, b, c, GpuTarget.Auto);
-```
-
-### 4.3 End-to-End Multi-Class Neural Network Training Loop
 ```csharp
 using Glacier.Tensor.Autograd;
+using Glacier.Tensor.Core;
 using Glacier.Tensor.Layers;
 using Glacier.Tensor.Losses;
 using Glacier.Tensor.Optimizers;
 
-using var l1 = new Linear(inFeatures: 8, outFeatures: 16);
-using var l2 = new Linear(inFeatures: 16, outFeatures: 3);
-var parameters = new List<Tensor<float>> { l1.Weight, l1.Bias, l2.Weight, l2.Bias };
-using var optimizer = new AdamW(parameters, lr: 0.08f);
+using var x = TensorFloatExtensions.RandomUniform([32, 8], -1f, 1f, seed: 1);
+using var targets = Tensor<float>.Zeros(32, 3);
+for (int i = 0; i < 32; i++) targets[i, i % 3] = 1.0f;
 
-for (int epoch = 0; epoch < 100; epoch++)
+using var l1 = new Linear(inFeatures: 8, outFeatures: 16, seed: 42);
+using var l2 = new Linear(inFeatures: 16, outFeatures: 3, seed: 43);
+var parameters = new[] { l1.Weight, l1.Bias, l2.Weight, l2.Bias };
+using var optimizer = new AdamW(parameters, lr: 0.05f);
+
+for (int epoch = 0; epoch < 25; epoch++)
 {
     optimizer.ZeroGrad();
 
@@ -148,104 +43,56 @@ for (int epoch = 0; epoch < 100; epoch++)
     foreach (var p in parameters) tape.Watch(p);
 
     using var h1 = l1.Forward(x);
-    using var act1 = TensorOps.GELU(h1);
-    using var logits = l2.Forward(act1);
+    using var act = TensorOps.GELU(h1);
+    using var logits = l2.Forward(act);
+    var (_, lossTensor) = LossFunctions.CrossEntropy(logits, targets);
+    using var _loss = lossTensor;
 
-    // Numerically-stable Log-Sum-Exp Cross Entropy Loss
-    var (lossVal, lossTensor) = LossFunctions.CrossEntropy(logits, targets);
-
-    // Reverse-mode tape backward pass propagates through all layers
     tape.Backward(lossTensor);
-
     optimizer.Step();
 }
 ```
 
-### 4.4 Parameter-Efficient Fine-Tuning (PEFT / LoRA)
-```csharp
-using Glacier.Tensor.Autograd;
-using Glacier.Tensor.Layers;
-using Glacier.Tensor.Optimizers;
+## What You Can Do
 
-// Wrap frozen base weights (e.g. from GGUF transformer layer) with low-rank adapters
-// Y = X * W0 + (alpha / r) * (X * A) * B
-using var baseWeights = Tensor<float>.Zeros(2048, 2048); // Frozen, 0 gradients
-using var lora = new LoraLinear(baseWeights, baseBias: null, rank: 16, alpha: 32f);
+| Capability | Description | Key Types |
+| :--- | :--- | :--- |
+| **Strided Tensors & Views** | Up to 8D unmanaged buffers (`Shape8`, `Strides8`) with reference-counted slices, reshapes, and transposes | `Tensor<T>`, `NativeMemoryBlock<T>`, `Shape8`, `Strides8`, `TensorOps` |
+| **Reverse-Mode Autograd** | Scoped `[ThreadStatic]` tape stack supporting nested inner tapes and reusable scratch workspaces | `AutogradTape`, `TapeEntry`, `AutogradOp`, `AutogradScratchWorkspace` |
+| **Layers, LoRA & Optimizers** | Prebuilt dense, normalization, and low-rank adapter layers with AdamW and SGD optimizers | `Linear`, `LoraLinear`, `LayerNorm`, `Sequential`, `AdamW`, `SGD` |
+| **Losses & Fused Cross-Entropy** | Mean squared error, BCE, cross-entropy, categorical cross-entropy, Brier/ECE, and tiled LM-head cross-entropy | `LossFunctions`, `FusedCrossEntropyLoss` |
+| **CPU & GPU Matrix Kernels** | AVX-512 / AVX2 / AdvSimd blocked GEMM plus CUDA, cuBLAS, Tensor Core WMMA, Direct3D 12, and Vulkan compute | `GemmKernels`, `GpuAccelerator`, `DeviceResidentTensor<T>`, `GpuTarget` |
+| **Ecosystem Interop** | Zero-copy/direct conversion with `Glacier.Polaris` data frames and `Glacier.Compute` ring AllReduce | `PolarisExtensions`, `GlacierDistributedTensorExtensions` |
 
-// 98.4% parameter reduction: only A and B are registered on optimizer
-using var optimizer = new AdamW(lora.Parameters, lr: 0.01f);
+## Platform & Compatibility
 
-using var tape = new AutogradTape();
-foreach (var p in lora.Parameters) tape.Watch(p);
+- Targets `.NET 10` (`<IsAotCompatible>true</IsAotCompatible>`, `<TreatWarningsAsErrors>true</TreatWarningsAsErrors>`).
+- CPU kernels execute on x64 (`AVX-512`, `AVX2`, scalar fallback) and ARM64 (`AdvSimd`).
+- GPU GEMM supports NVIDIA CUDA (`nvcuda.dll` / `libcuda.so.1`), NVIDIA Tensor Cores (`sm_75+`), Direct3D 12 Compute (Windows), and Vulkan 1.3 (`GpuTarget` routes `Auto`, `Cpu`, `Nvidia`, `NvidiaTensorCore`, `Direct3D12`, `Vulkan`, `Amd`, or `DualGpu`).
 
-var pred = lora.Forward(tokens);
-var (loss, lossTensor) = LossFunctions.MSELoss(pred, targets);
-tape.Backward(lossTensor);
-optimizer.Step();
+## Benchmarks
 
-// Zero-overhead inference merge: folds A and B directly into base weight W0
-using var mergedModel = lora.Merge();
-```
+Measured with `dotnet run --project benchmarks/Glacier.Tensor.Benchmarks/Glacier.Tensor.Benchmarks.csproj -c Release` on an AMD Ryzen AI 9 HX 370 (`.NET 10.0.15`, Windows 11) with NVIDIA GeForce RTX 4060 Laptop GPU:
 
----
+| Benchmark | Backend | Latency | Throughput |
+| :--- | :--- | ---: | ---: |
+| **GEMM `1024 x 1024` FP32** | CPU (`GemmKernels.MatMul`) | `4.77 ms` | **449.80 GFLOPS** |
+| **GEMM `2048 x 2048` FP32** | CPU (`GemmKernels.MatMul`) | `33.10 ms` | **519.07 GFLOPS** |
+| **GEMM `2048 x 2048` FP32** | RTX 4060 Resident (`DeviceResidentTensor`) | `3.387 ms` | **5.07 TFLOPS** |
+| **GEMM `2048 x 2048` FP32** | D3D12 Resident (`D3D12GemmKernel`) | `3.917 ms` | **4.39 TFLOPS** |
+| **Autograd MLP `64x128->256->16`** | CPU (`Linear`+`LayerNorm`+`GELU`+`CrossEntropy`+`AdamW`) | `0.599 ms/step` | — |
 
-## 5. Ecosystem Cross-References
+See [docs/benchmarks.md](docs/benchmarks.md) for full Vulkan, copied-vs-resident GPU, and LoRA layer measurements.
 
-`Glacier.Tensor` is designed to seamlessly integrate with the other engines in the **Glacier .NET 10 High-Performance Ecosystem**:
+## Documentation
 
-- **[Master Architecture Plan](../../GLACIER_ECOSYSTEM_MASTER_PLAN.md)**: Ecosystem blueprint mapping the 9 Python domains to .NET 10 counterparts.
-- **[Glacier.Inference](https://github.com/ian-cowley/Glacier.Inference)**: High-performance GGUF inference engine with SIMD AVX-512, D3D12, and Vulkan tensor cores.
-- **[Glacier.Tune](https://github.com/ian-cowley/Glacier.Tune)**: Parameter-efficient fine-tuning (PEFT), LoRA/QLoRA, and causal transformer backpropagation.
-- **[Glacier.Polaris](https://github.com/ian-cowley/Glacier.Polaris)**: Arrow columnar memory backend providing zero-copy feature feeds.
-- **[Glacier.ML](https://github.com/ian-cowley/Glacier.ML)**: Classical machine learning algorithms and histogram-based tree engines.
-- **[Glacier.Serve](https://github.com/ian-cowley/Glacier.Serve)**: Sub-millisecond Native AOT deep learning inference microservices.
+- [User Manual](docs/manual.md) — tensors, views, autograd, layers, losses, GPU execution, Polaris interop, and diagnostics
+- [Architecture](docs/architecture.md) — unmanaged reference counting, thread-static tape stack, SIMD GEMM tiling, and GPU dispatch
+- [Benchmarks](docs/benchmarks.md) — complete hardware/OS/.NET spec and measured CPU/CUDA/D3D12/Vulkan results
+- [Changelog](CHANGELOG.md) — release history
 
----
-
-## 🆕 What's New in v1.1.0
-
-- **Expanded Reverse-Mode Autograd & View Differentiation** — Full reverse-mode backpropagation through `Softmax` (arbitrary inner/outer axes), `LayerNorm` (`dInput`, `dGamma`, `dBeta`), strided tensor views (`Slice`, `Transpose`, `Reshape`, `Contiguous`), and all five loss functions (`MSELoss`, `BinaryCrossEntropy`, `CrossEntropy`, `CategoricalCrossEntropyLoss`, `BrierScoreLoss`) supporting both `tape.Backward(lossTensor)` and `tape.Backward(predictions)`.
-- **Nested `[ThreadStatic]` Autograd Tape Stack** — Scoped stack-based `AutogradTape.Current` management so nested inner tapes cleanly restore outer tapes upon disposal without corrupting active graphs.
-- **Lock-Free CAS Reference Counting & Finalizer Safety (`NativeMemoryBlock<T>`)** — Atomic compare-exchange loops preventing `AddRef`/`Dispose` races, double-free immunity, and unmanaged finalizer safety, plus automatic intermediate activation disposal in `LoraLinear` and `Sequential` during inference.
-- **Multi-Architecture CUDA Context Binding & Native AOT Hardening** — Thread-safe worker CUDA context binding in `CudaExecutionContext` and `DeviceResidentTensor<T>`, Turing+ PTX headers (`sm_75+`), isolated Windows Direct3D 12 initialization, `<IsAotCompatible>true</IsAotCompatible>`, and NuGet OIDC Trusted Publishing.
-
----
-
-## 🆕 What's New in v1.0.8
-
-- **Defensive Unmanaged Memory Fortification (`NativeMemoryBlock<T>`)** — Strict parameter bounds validation in `AsSpan(offset, length)` preventing negative offsets, negative lengths, capacity overflows, and pointer integer wrapping.
-- **Thread-Isolated Direct3D 12 Diagnostics** — Structured hardware execution telemetry and failure stage reporting (`D3D12ExecutionStage`, `D3D12KernelDiagnostics`) backed by `[ThreadStatic]` diagnostic contexts, eliminating silent exception swallowing while ensuring complete thread isolation.
-- **Pluggable Ambient Logging** — Integrated zero-dependency `GlacierDiagnostics` / `IGlacierLogger`.
-- **194 unit tests** passing (100% green).
-
----
-
-## 🆕 What's New in v1.0.7
-
-- **`CudaExecutionContext` pool** — replaces the previous global `s_initLock` mutex, enabling lock-free concurrent GPU context acquisition.
-- **SIMD-vectorised autograd tape gradient accumulation** — `Vector256<float>` fused multiply-add (FMA) accumulates gradients directly into unmanaged parameter buffers.
-- **Zero per-operation heap allocation in backward pass** — the entire reverse-mode tape executes without touching the managed heap.
-- **111 tests** passing (100 %).
-
----
-
-## Credits
-
-Developed by Ian Cowley and Antigravity (Google DeepMind).
-
----
-
-## License
+## License & Credits
 
 Licensed under the [MIT License](LICENSE). Copyright (c) 2026 Ian Cowley.
 
----
-
-## ❄️ Glacier Ecosystem & Support
-
-Part of the **[Glacier Ecosystem](https://glaciersoftware.dev/)** — high-performance, zero-allocation developer tooling and data engines natively built for modern C# and .NET 10.
-
-* 🌐 **Website & Documentation**: [glaciersoftware.dev](https://glaciersoftware.dev/)
-* ☕ **Buy Me a Coffee**: [buymeacoffee.com/glaciersoftware](https://buymeacoffee.com/glaciersoftware)
-* ❤️ **GitHub Sponsors**: [github.com/sponsors/ian-cowley](https://github.com/sponsors/ian-cowley)
-* 🐙 **All Repositories**: [github.com/ian-cowley](https://github.com/ian-cowley)
+Developed by Ian Cowley, Antigravity (Google DeepMind) and Claude.

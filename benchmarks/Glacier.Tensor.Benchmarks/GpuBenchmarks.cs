@@ -126,4 +126,43 @@ public static class GpuBenchmarks
             Console.WriteLine($"  -> Speedup: {d3dSpeedup:F2}x lower latency bypassing D3D12 staging copies");
         }
     }
+
+    public static void RunVulkanBenchmark()
+    {
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("\n================================================================================");
+        Console.WriteLine("  VULKAN 1.3 COMPUTE GEMM BENCHMARK                                               ");
+        Console.WriteLine("================================================================================");
+        Console.ResetColor();
+
+        if (!VulkanGemmKernel.IsSupported)
+        {
+            Console.WriteLine("  [SKIP] Vulkan compute is not supported on this platform/adapter.");
+            return;
+        }
+
+        Console.WriteLine($"  Active Vulkan Hardware Adapter: {VulkanGemmKernel.DeviceName}");
+
+        int[] sizes = { 1024, 2048 };
+        foreach (int size in sizes)
+        {
+            using var a = TensorFloatExtensions.RandomUniform([size, size], -1f, 1f, seed: 1);
+            using var b = TensorFloatExtensions.RandomUniform([size, size], -1f, 1f, seed: 2);
+            using var c = new Tensor<float>(size, size);
+
+            VulkanGemmKernel.Execute(a, b, c);
+
+            int iters = 10;
+            var sw = Stopwatch.StartNew();
+            for (int i = 0; i < iters; i++)
+            {
+                VulkanGemmKernel.Execute(a, b, c);
+            }
+            sw.Stop();
+
+            double avgMs = sw.Elapsed.TotalMilliseconds / iters;
+            double gflops = (2.0 * size * size * size / (avgMs * 1e6));
+            Console.WriteLine($"  [Vulkan Copied {size}x{size}]  Latency: {avgMs:F3} ms | Throughput: {gflops:F1} GFLOPS ({gflops / 1000.0:F2} TFLOPS)");
+        }
+    }
 }
