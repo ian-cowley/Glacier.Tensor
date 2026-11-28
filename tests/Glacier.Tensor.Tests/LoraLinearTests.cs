@@ -52,9 +52,10 @@ public class LoraLinearTests
         foreach (var p in lora.Parameters) tape.Watch(p);
 
         using var output = lora.Forward(x);
-        var (loss, _) = LossFunctions.MSELoss(output, targets);
+        var (loss, lossTensor) = LossFunctions.MSELoss(output, targets);
+        using var _loss = lossTensor;
 
-        tape.Backward(output);
+        tape.Backward(lossTensor);
 
         // Base weight must have no gradients and remain RequiresGrad = false
         Assert.False(lora.BaseWeight.RequiresGrad);
@@ -97,12 +98,13 @@ public class LoraLinearTests
             foreach (var p in lora.Parameters) tape.Watch(p);
 
             using var pred = lora.Forward(x);
-            var (lossVal, _) = LossFunctions.MSELoss(pred, target);
+            var (lossVal, lossTensor) = LossFunctions.MSELoss(pred, target);
+            using var _loss = lossTensor;
 
             if (step == 0) initialLoss = lossVal;
             finalLoss = lossVal;
 
-            tape.Backward(pred);
+            tape.Backward(lossTensor);
             optimizer.Step();
         }
 

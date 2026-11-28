@@ -16,7 +16,7 @@ public class GpuAcceleratorTests
         bool hasAmd = GpuAccelerator.HasAmdGpu;
         bool isGpuAvail = GpuAccelerator.IsGpuAvailable;
 
-        Assert.Equal(hasNvidia || hasAmd, isGpuAvail);
+        Assert.Equal(hasNvidia || hasAmd || GpuAccelerator.HasDirect3D12 || GpuAccelerator.HasVulkan, isGpuAvail);
     }
 
     [Theory]
@@ -47,6 +47,7 @@ public class GpuAcceleratorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void MatMul_Nvidia_IfHardwareAvailable_ComputesAccurateResult()
     {
         if (!GpuAccelerator.HasNvidiaGpu)
@@ -66,6 +67,7 @@ public class GpuAcceleratorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void MatMul_Amd_IfHardwareAvailable_ComputesAccurateResult()
     {
         if (!GpuAccelerator.HasAmdGpu)
@@ -85,6 +87,7 @@ public class GpuAcceleratorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void MatMul_Direct3D12_IfHardwareAvailable_ComputesAccurateResult()
     {
         if (!GpuAccelerator.HasDirect3D12)
@@ -103,6 +106,7 @@ public class GpuAcceleratorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void MatMul_Vulkan_IfHardwareAvailable_ComputesAccurateResult()
     {
         if (!GpuAccelerator.HasVulkan)
@@ -121,6 +125,7 @@ public class GpuAcceleratorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void MatMul_DualGpu_ExecutesOrFallsBackGracefully()
     {
         int M = 128, K = 64, N = 96;
@@ -134,6 +139,7 @@ public class GpuAcceleratorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void MatMul_NvidiaTensorCore_IfHardwareAvailable_ComputesAccurateResult()
     {
         if (!GpuAccelerator.HasNvidiaGpu)
@@ -178,6 +184,7 @@ public class GpuAcceleratorTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public async Task MatMul_NvidiaConcurrentThreads_IfHardwareAvailable_ExecutesConcurrently()
     {
         if (!GpuAccelerator.HasNvidiaGpu)

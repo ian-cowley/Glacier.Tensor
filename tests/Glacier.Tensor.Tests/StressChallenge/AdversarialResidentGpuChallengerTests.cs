@@ -355,6 +355,7 @@ public class AdversarialResidentGpuChallengerTests
     // =========================================================================
 
     [Theory]
+    [Trait("Hardware", "Gpu")]
     [InlineData(64, 64, 64)]
     [InlineData(128, 96, 64)]
     [InlineData(256, 256, 256)]
@@ -406,6 +407,7 @@ public class AdversarialResidentGpuChallengerTests
     // =========================================================================
 
     [Theory]
+    [Trait("Hardware", "Gpu")]
     [InlineData(1024)]
     [InlineData(2048)]
     public void DeviceResidentTensor_PhysicalGpuThroughput_MustExceedFourTflops(int size)

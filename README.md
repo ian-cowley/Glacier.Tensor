@@ -27,7 +27,7 @@ Deep learning in Python is dominated by **TensorFlow** and **PyTorch**. While th
 **Glacier.Tensor** solves these issues with:
 - **`Tensor<T>` Strided Memory Representation**: Multi-dimensional strided tensor engine with zero-copy slicing, transpositions, and broadcasting over contiguous 64-byte aligned unmanaged memory blocks.
 - **Bare-Metal GPU & Ada Lovelace 4th-Gen Tensor Core Acceleration**: Direct driver P/Invoke (`nvcuda.dll` and `amdhip64.dll`) executing WMMA instructions (`wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32`) on NVIDIA RTX 4060 dGPU and AMD unified memory APUs with zero CUDA/ROCm SDK dependencies.
-- **Direct3D 12 & Universal Vulkan 1.3+ Compute**: Native DirectX 12 Compute and cross-platform Vulkan compute engines running 16x16 shared-memory tiled GEMM kernels with double-buffering. Accelerates AMD Radeon APUs (e.g., Radeon 890M / 780M) and discrete GPUs across Windows and Linux.
+- **Direct3D 12 & Universal Vulkan 1.3+ Compute**: Native DirectX 12 Compute and cross-platform Vulkan compute engines running 64x64 (`4x4` register-tiled) shared-memory GEMM kernels with double-buffered D3D12 staging/shader caching and `DEVICE_LOCAL` Vulkan VRAM staging. Accelerates AMD Radeon APUs (e.g., Radeon 890M / 780M) and discrete GPUs across Windows and Linux.
 - **Dynamic Hardware Target Dispatch (`GpuTarget`)**: Seamlessly routes operations across `GpuTarget.NvidiaTensorCore`, `GpuTarget.Nvidia`, `GpuTarget.Direct3D12`, `GpuTarget.Vulkan`, `GpuTarget.Amd`, `GpuTarget.DualGpu`, `GpuTarget.Cpu`, or `GpuTarget.Auto`.
 - **Cache-Blocked SIMD GEMM**: CPU matrix multiplication leveraging `Vector512<float>` (AVX-512 FMA) micro-kernels that achieve theoretical peak CPU floating-point throughput rivaling Intel MKL.
 - **Zero-Allocation Reverse-Mode Autograd Tape**: Pre-allocated contiguous operation tape avoiding heap allocations during forward and backward execution graphs.
@@ -88,10 +88,13 @@ Deep learning in Python is dominated by **TensorFlow** and **PyTorch**. While th
 ```csharp
 using Glacier.Tensor;
 using Glacier.Tensor.Autograd;
+using Glacier.Tensor.Core;
 using Glacier.Tensor.Layers;
+using Glacier.Tensor.Losses;
 
 // Allocate 64-byte aligned tensors with shape [Batch, Features]
 using var x = Tensor<float>.FromSpan(new float[] { 1.0f, 2.0f, 3.0f, 4.0f }, shape: [2, 2]);
+using var targets = Tensor<float>.Ones(2, 1);
 using var weights = Tensor<float>.RandomNormal(shape: [2, 1], seed: 42);
 
 // Execute forward pass recording operations onto the zero-allocation tape
@@ -100,7 +103,7 @@ tape.Watch(weights);
 
 var hidden = TensorOps.MatMul(x, weights);
 var prediction = TensorOps.Sigmoid(hidden);
-var loss = TensorOps.BinaryCrossEntropy(prediction, targets);
+var (_, loss) = LossFunctions.BinaryCrossEntropy(prediction, targets);
 
 // Backward pass executes in reverse topological order directly into parameter gradient buffers
 tape.Backward(loss);
@@ -176,8 +179,8 @@ using var tape = new AutogradTape();
 foreach (var p in lora.Parameters) tape.Watch(p);
 
 var pred = lora.Forward(tokens);
-var (loss, _) = LossFunctions.MSELoss(pred, targets);
-tape.Backward(pred);
+var (loss, lossTensor) = LossFunctions.MSELoss(pred, targets);
+tape.Backward(lossTensor);
 optimizer.Step();
 
 // Zero-overhead inference merge: folds A and B directly into base weight W0

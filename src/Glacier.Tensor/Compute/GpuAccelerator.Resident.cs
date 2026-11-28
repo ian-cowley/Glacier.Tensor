@@ -28,6 +28,8 @@ public static unsafe partial class GpuAccelerator
 
         if (a.Rank != 2 || b.Rank != 2 || c.Rank != 2)
             throw new ArgumentException("All tensors must be Rank 2 matrices.");
+        if (!a.IsContiguous || !b.IsContiguous || !c.IsContiguous)
+            throw new InvalidOperationException("Device-resident GEMM requires contiguous tensor layouts.");
         if (a.Shape[1] != b.Shape[0])
             throw new ArgumentException($"Inner dimension mismatch: {a.Shape[1]} != {b.Shape[0]}");
         if (c.Shape[0] != a.Shape[0] || c.Shape[1] != b.Shape[1])
@@ -52,6 +54,10 @@ public static unsafe partial class GpuAccelerator
         int k,
         IntPtr stream = default)
     {
+        if (m < 0 || n < 0 || k < 0)
+            return false;
+        if (m == 0 || n == 0 || k == 0)
+            return true;
         if (!EnsureNvidiaInitialized() || s_cuGemmFn == IntPtr.Zero)
             return false;
         if (devA == IntPtr.Zero || devB == IntPtr.Zero || devC == IntPtr.Zero)
@@ -110,7 +116,10 @@ public static unsafe partial class GpuAccelerator
             );
 
             if (lRes != 0) return false;
-            CuDriver.StreamSynchronize(actualStream);
+            if (stream == IntPtr.Zero)
+            {
+                CuDriver.Check(CuDriver.StreamSynchronize(actualStream), "cuStreamSynchronize");
+            }
             return true;
         }
         catch
@@ -141,6 +150,8 @@ public static unsafe partial class GpuAccelerator
 
         if (a.Rank != 2 || b.Rank != 2 || c.Rank != 2)
             throw new ArgumentException("All tensors must be Rank 2 matrices.");
+        if (!a.IsContiguous || !b.IsContiguous || !c.IsContiguous)
+            throw new InvalidOperationException("Device-resident GEMM requires contiguous tensor layouts.");
         if (a.Shape[1] != b.Shape[0])
             throw new ArgumentException($"Inner dimension mismatch: {a.Shape[1]} != {b.Shape[0]}");
         if (c.Shape[0] != a.Shape[0] || c.Shape[1] != b.Shape[1])
@@ -165,6 +176,10 @@ public static unsafe partial class GpuAccelerator
         int k,
         IntPtr stream = default)
     {
+        if (m < 0 || n < 0 || k < 0)
+            return false;
+        if (m == 0 || n == 0 || k == 0)
+            return true;
         if (!EnsureNvidiaInitialized() || s_cuTensorCoreFp32Fn == IntPtr.Zero)
             return false;
         if (devA == IntPtr.Zero || devB == IntPtr.Zero || devC == IntPtr.Zero)
@@ -223,7 +238,10 @@ public static unsafe partial class GpuAccelerator
             );
 
             if (lRes != 0) return false;
-            CuDriver.StreamSynchronize(actualStream);
+            if (stream == IntPtr.Zero)
+            {
+                CuDriver.Check(CuDriver.StreamSynchronize(actualStream), "cuStreamSynchronize");
+            }
             return true;
         }
         catch

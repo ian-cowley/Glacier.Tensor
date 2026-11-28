@@ -20,7 +20,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
 
     private readonly NativeMemoryBlock<T> _memory;
     private readonly Shape8 _shape;
-    private readonly Shape8 _strides;
+    private readonly Strides8 _longStrides;
     private readonly long _elementOffset;
     private readonly bool _isContiguous;
     private readonly int _tensorId;
@@ -32,7 +32,8 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     public int TensorId => _tensorId;
     public int Rank => _shape.Rank;
     public Shape8 Shape => _shape;
-    public Shape8 Strides => _strides;
+    public Strides8 LongStrides => _longStrides;
+    public Shape8 Strides => _longStrides.ToShape8();
     public long ElementCount => _shape.ElementCount;
     public bool IsContiguous => _isContiguous;
     public long ElementOffset => _elementOffset;
@@ -63,27 +64,60 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     }
 
     public Tensor(NativeMemoryBlock<T> memory, Shape8 shape, Shape8 strides, long elementOffset = 0)
+        : this(memory, shape, Strides8.FromShape8(strides), elementOffset, addRef: true)
     {
+    }
+
+    public Tensor(NativeMemoryBlock<T> memory, Shape8 shape, Strides8 strides, long elementOffset = 0)
+        : this(memory, shape, strides, elementOffset, addRef: true)
+    {
+    }
+
+    internal Tensor(NativeMemoryBlock<T> memory, Shape8 shape, Strides8 strides, long elementOffset, bool addRef)
+    {
+        ArgumentNullException.ThrowIfNull(memory);
+        if (shape.Rank != strides.Rank)
+            throw new ArgumentException($"Shape rank ({shape.Rank}) must match strides rank ({strides.Rank}).", nameof(strides));
+        ArgumentOutOfRangeException.ThrowIfNegative(elementOffset);
+
+        if (addRef)
+        {
+            memory.AddRef();
+        }
+
         _memory = memory;
         _shape = shape;
-        _strides = strides;
+        _longStrides = strides;
         _elementOffset = elementOffset;
-        _isContiguous = _shape.IsContiguous(_strides);
+        _isContiguous = _shape.IsContiguous(in _longStrides);
         _tensorId = Interlocked.Increment(ref s_idCounter);
+        GC.SuppressFinalize(this);
     }
 
     public Tensor(in Shape8 shape)
     {
         _shape = shape;
-        _strides = Shape8.ComputeContiguousStrides(_shape);
+        _longStrides = Strides8.ComputeContiguous(_shape);
         _memory = new NativeMemoryBlock<T>(_shape.ElementCount, clear: true);
         _elementOffset = 0;
         _isContiguous = true;
         _tensorId = Interlocked.Increment(ref s_idCounter);
+        GC.SuppressFinalize(this);
     }
 
     public Tensor(params ReadOnlySpan<int> shape) : this(new Shape8(shape))
     {
+    }
+
+    ~Tensor()
+    {
+        try
+        {
+            FreeDeviceMemory();
+        }
+        catch
+        {
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -96,7 +130,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         get
         {
             Debug.Assert(Rank == 1);
-            return ref *(DataPointer + (long)i * _strides[0]);
+            return ref *(DataPointer + (long)i * _longStrides[0]);
         }
     }
 
@@ -106,7 +140,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         get
         {
             Debug.Assert(Rank == 2);
-            return ref *(DataPointer + (long)i * _strides[0] + (long)j * _strides[1]);
+            return ref *(DataPointer + (long)i * _longStrides[0] + (long)j * _longStrides[1]);
         }
     }
 
@@ -116,7 +150,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         get
         {
             Debug.Assert(Rank == 3);
-            return ref *(DataPointer + (long)i * _strides[0] + (long)j * _strides[1] + (long)k * _strides[2]);
+            return ref *(DataPointer + (long)i * _longStrides[0] + (long)j * _longStrides[1] + (long)k * _longStrides[2]);
         }
     }
 
@@ -126,7 +160,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         get
         {
             Debug.Assert(Rank == 4);
-            return ref *(DataPointer + (long)i * _strides[0] + (long)j * _strides[1] + (long)k * _strides[2] + (long)l * _strides[3]);
+            return ref *(DataPointer + (long)i * _longStrides[0] + (long)j * _longStrides[1] + (long)k * _longStrides[2] + (long)l * _longStrides[3]);
         }
     }
 
@@ -141,7 +175,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
             long offset = 0;
             for (int d = 0; d < indices.Length; d++)
             {
-                offset += (long)indices[d] * _strides[d];
+                offset += (long)indices[d] * _longStrides[d];
             }
             return ref *(DataPointer + offset);
         }
@@ -160,11 +194,10 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         if (start < 0 || length < 0 || (long)start + length > _shape[dimension])
             throw new ArgumentOutOfRangeException($"Invalid slice: start {start}, len {length} for dim size {_shape[dimension]}");
 
-        long newOffset = _elementOffset + (long)start * _strides[dimension];
+        long newOffset = checked(_elementOffset + (long)start * _longStrides[dimension]);
         Shape8 newShape = _shape.WithDimension(dimension, length);
 
-        _memory.AddRef();
-        var result = new Tensor<T>(_memory, newShape, _strides, newOffset);
+        var result = new Tensor<T>(_memory, newShape, _longStrides, newOffset);
         RecordViewOpIfNeeded(AutogradOp.Slice, result, dimension, start, length);
         return result;
     }
@@ -174,9 +207,8 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         Shape8 newShape = _shape.SwapDimensions(dim0, dim1);
-        Shape8 newStrides = _strides.SwapDimensions(dim0, dim1);
+        Strides8 newStrides = _longStrides.SwapDimensions(dim0, dim1);
 
-        _memory.AddRef();
         var result = new Tensor<T>(_memory, newShape, newStrides, _elementOffset);
         RecordViewOpIfNeeded(AutogradOp.Transpose, result, dim0, dim1, 0);
         return result;
@@ -200,8 +232,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         Tensor<T> result;
         if (IsContiguous)
         {
-            _memory.AddRef();
-            result = new Tensor<T>(_memory, shape, Shape8.ComputeContiguousStrides(shape), _elementOffset);
+            result = new Tensor<T>(_memory, shape, Strides8.ComputeContiguous(shape), _elementOffset);
         }
         else
         {
@@ -219,8 +250,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         Tensor<T> result;
         if (IsContiguous && _elementOffset == 0)
         {
-            _memory.AddRef();
-            result = new Tensor<T>(_memory, _shape, _strides, 0);
+            result = new Tensor<T>(_memory, _shape, _longStrides, 0);
         }
         else
         {
@@ -260,6 +290,11 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     private static void CopyElementsToFlatSpan(Tensor<T> src, Span<T> dst)
     {
         int rank = src.Rank;
+        if (rank == 0)
+        {
+            dst[0] = *src.DataPointer;
+            return;
+        }
         if (rank == 1)
         {
             int n = src.Shape[0];
@@ -281,7 +316,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         else
         {
             Span<int> indices = stackalloc int[rank];
-            int count = (int)src.ElementCount;
+            int count = checked((int)src.ElementCount);
             for (int i = 0; i < count; i++)
             {
                 dst[i] = src[indices];
@@ -295,9 +330,14 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         }
     }
 
-    private static void CopyElements(Tensor<T> src, Tensor<T> dst)
+    internal static void CopyElements(Tensor<T> src, Tensor<T> dst)
     {
         int rank = src.Rank;
+        if (rank == 0)
+        {
+            *dst.DataPointer = *src.DataPointer;
+            return;
+        }
         if (rank == 1)
         {
             int n = src.Shape[0];
@@ -337,7 +377,10 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!IsContiguous)
             throw new InvalidOperationException("AsSpan() is only valid for contiguous tensors. Call Contiguous() first.");
-        return new Span<T>(DataPointer, (int)ElementCount);
+        long count = ElementCount;
+        if (count > int.MaxValue)
+            throw new InvalidOperationException($"Tensor element count ({count}) exceeds maximum Span<T> length ({int.MaxValue}).");
+        return new Span<T>(DataPointer, (int)count);
     }
 
     public void Fill(T value)
@@ -365,7 +408,10 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
 
     public T[] ToArray()
     {
-        var arr = new T[ElementCount];
+        long count = ElementCount;
+        if (count > int.MaxValue)
+            throw new InvalidOperationException($"Tensor element count ({count}) exceeds maximum array length.");
+        var arr = new T[(int)count];
         if (IsContiguous)
         {
             AsSpan().CopyTo(arr);
@@ -417,9 +463,14 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     [MethodImpl(MethodImplOptions.NoInlining)]
     private bool AllocateDeviceMemoryCore()
     {
-        nuint bytes = (nuint)(ElementCount * sizeof(T));
+        nuint bytes = checked((nuint)ElementCount * (nuint)sizeof(T));
         int res = CuDriver.MemAlloc(out _devicePointer, bytes);
-        return res == 0 && _devicePointer != IntPtr.Zero;
+        if (res == 0 && _devicePointer != IntPtr.Zero)
+        {
+            GC.ReRegisterForFinalize(this);
+            return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -437,7 +488,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     [MethodImpl(MethodImplOptions.NoInlining)]
     private bool CopyToDeviceCore(IntPtr stream)
     {
-        nuint bytes = (nuint)(ElementCount * sizeof(T));
+        nuint bytes = checked((nuint)ElementCount * (nuint)sizeof(T));
         fixed (T* ptr = AsSpan())
         {
             if (stream == IntPtr.Zero)
@@ -465,7 +516,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
     [MethodImpl(MethodImplOptions.NoInlining)]
     private bool CopyToHostCore(IntPtr stream)
     {
-        nuint bytes = (nuint)(ElementCount * sizeof(T));
+        nuint bytes = checked((nuint)ElementCount * (nuint)sizeof(T));
         fixed (T* ptr = AsSpan())
         {
             if (stream == IntPtr.Zero)
@@ -501,6 +552,10 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
             }
             _devicePointer = IntPtr.Zero;
         }
+        if (!_disposed)
+        {
+            GC.SuppressFinalize(this);
+        }
     }
 
     public void Dispose()
@@ -512,6 +567,7 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
             _grad?.Dispose();
             _grad = null;
             _memory.Dispose();
+            GC.SuppressFinalize(this);
         }
     }
 

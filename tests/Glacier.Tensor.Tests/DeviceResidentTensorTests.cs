@@ -12,6 +12,7 @@ using Glacier.Tensor.Compute;
 using Glacier.Tensor.Core;
 using Xunit;
 
+[Trait("Hardware", "Gpu")]
 public class DeviceResidentTensorTests
 {
     private static bool IsAnyGpuAvailable => CuDriver.IsAvailable() || (OperatingSystem.IsWindows() && D3D12GemmKernel.IsSupported);

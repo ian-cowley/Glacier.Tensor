@@ -31,7 +31,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     private readonly GpuBuffer<T> _buffer;
     private readonly BufferRefCount _refCount;
     private readonly Shape8 _shape;
-    private readonly Shape8 _strides;
+    private readonly Strides8 _longStrides;
     private readonly long _elementOffset;
     private readonly bool _isContiguous;
     private readonly int _tensorId;
@@ -46,8 +46,11 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// <summary>Gets the N-dimensional shape.</summary>
     public Shape8 Shape => _shape;
 
+    /// <summary>Gets the 64-bit stride vector.</summary>
+    public Strides8 LongStrides => _longStrides;
+
     /// <summary>Gets the stride vector.</summary>
-    public Shape8 Strides => _strides;
+    public Shape8 Strides => _longStrides.ToShape8();
 
     /// <summary>Gets the total number of elements.</summary>
     public long ElementCount => _shape.ElementCount;
@@ -76,7 +79,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
             ObjectDisposedException.ThrowIf(IsDisposed, this);
             return _buffer.DevicePointer == IntPtr.Zero
                 ? IntPtr.Zero
-                : _buffer.DevicePointer + (int)(_elementOffset * sizeof(T));
+                : _buffer.DevicePointer + (nint)checked(_elementOffset * (long)sizeof(T));
         }
     }
 
@@ -89,7 +92,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
             ObjectDisposedException.ThrowIf(IsDisposed, this);
             return _buffer.GpuVirtualAddress == 0
                 ? 0
-                : _buffer.GpuVirtualAddress + (ulong)(_elementOffset * sizeof(T));
+                : _buffer.GpuVirtualAddress + checked((ulong)_elementOffset * (ulong)sizeof(T));
         }
     }
 
@@ -97,11 +100,19 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// Initializes a new instance of the <see cref="DeviceResidentTensor{T}"/> class with explicit strides and offset.
     /// </summary>
     public DeviceResidentTensor(GpuBuffer<T> buffer, Shape8 shape, Shape8 strides, long elementOffset = 0)
+        : this(buffer, new BufferRefCount(), shape, Strides8.FromShape8(strides), elementOffset, incrementRef: false)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DeviceResidentTensor{T}"/> class with explicit 64-bit strides and offset.
+    /// </summary>
+    public DeviceResidentTensor(GpuBuffer<T> buffer, Shape8 shape, Strides8 strides, long elementOffset = 0)
         : this(buffer, new BufferRefCount(), shape, strides, elementOffset, incrementRef: false)
     {
     }
 
-    private DeviceResidentTensor(GpuBuffer<T> buffer, BufferRefCount refCount, Shape8 shape, Shape8 strides, long elementOffset, bool incrementRef)
+    private DeviceResidentTensor(GpuBuffer<T> buffer, BufferRefCount refCount, Shape8 shape, Strides8 strides, long elementOffset, bool incrementRef)
     {
         _buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
         _refCount = refCount ?? throw new ArgumentNullException(nameof(refCount));
@@ -110,9 +121,9 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
             Interlocked.Increment(ref _refCount.Count);
         }
         _shape = shape;
-        _strides = strides;
+        _longStrides = strides;
         _elementOffset = elementOffset;
-        _isContiguous = _shape.IsContiguous(_strides);
+        _isContiguous = _shape.IsContiguous(in _longStrides);
         _tensorId = Interlocked.Increment(ref s_idCounter);
     }
 
@@ -120,7 +131,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     /// Initializes a new instance of the <see cref="DeviceResidentTensor{T}"/> class with contiguous strides.
     /// </summary>
     public DeviceResidentTensor(GpuBuffer<T> buffer, in Shape8 shape)
-        : this(buffer, shape, Shape8.ComputeContiguousStrides(shape), 0)
+        : this(buffer, shape, Strides8.ComputeContiguous(shape), 0)
     {
     }
 
@@ -131,16 +142,17 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     public static DeviceResidentTensor<T> Allocate(params ReadOnlySpan<int> shape)
     {
         var sh = new Shape8(shape);
-        var strides = Shape8.ComputeContiguousStrides(sh);
+        var strides = Strides8.ComputeContiguous(sh);
+        int elemCount = checked((int)sh.ElementCount);
 
         GpuBuffer<T> buffer;
         if (GpuAccelerator.BindNvidiaContext())
         {
-            buffer = GpuBuffer<T>.AllocateCuda((int)sh.ElementCount);
+            buffer = GpuBuffer<T>.AllocateCuda(elemCount);
         }
         else if (OperatingSystem.IsWindows() && D3D12GemmKernel.IsSupported && D3D12GemmKernel.Device != null)
         {
-            buffer = GpuBuffer<T>.AllocateD3D12(D3D12GemmKernel.Device, (int)sh.ElementCount, ResourceFlags.AllowUnorderedAccess);
+            buffer = GpuBuffer<T>.AllocateD3D12(D3D12GemmKernel.Device, elemCount, ResourceFlags.AllowUnorderedAccess);
         }
         else
         {
@@ -157,8 +169,8 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     {
         GpuAccelerator.BindNvidiaContext();
         var sh = new Shape8(shape);
-        var strides = Shape8.ComputeContiguousStrides(sh);
-        var buffer = GpuBuffer<T>.AllocateCuda((int)sh.ElementCount);
+        var strides = Strides8.ComputeContiguous(sh);
+        var buffer = GpuBuffer<T>.AllocateCuda(checked((int)sh.ElementCount));
         return new DeviceResidentTensor<T>(buffer, sh, strides, 0);
     }
 
@@ -166,8 +178,8 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     public static DeviceResidentTensor<T> AllocateD3D12(ID3D12Device device, ReadOnlySpan<int> shape, ResourceFlags flags = ResourceFlags.AllowUnorderedAccess)
     {
         var sh = new Shape8(shape);
-        var strides = Shape8.ComputeContiguousStrides(sh);
-        var buffer = GpuBuffer<T>.AllocateD3D12(device, (int)sh.ElementCount, flags);
+        var strides = Strides8.ComputeContiguous(sh);
+        var buffer = GpuBuffer<T>.AllocateD3D12(device, checked((int)sh.ElementCount), flags);
         return new DeviceResidentTensor<T>(buffer, sh, strides, 0);
     }
 
@@ -208,13 +220,120 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
     public void DownloadTo(Tensor<T> destination, IntPtr stream = default)
     {
         ObjectDisposedException.ThrowIf(IsDisposed, this);
+        ObjectDisposedException.ThrowIf(_buffer.IsDisposed, _buffer);
         ArgumentNullException.ThrowIfNull(destination, nameof(destination));
         if (destination.ElementCount != ElementCount)
             throw new ArgumentException($"Destination tensor element count ({destination.ElementCount}) does not match device tensor ({ElementCount}).");
         if (!destination.IsContiguous)
             throw new InvalidOperationException("Destination tensor must be contiguous for direct device download.");
 
-        _buffer.CopyToHost(destination.AsSpan(), stream);
+        if (ElementCount == 0)
+        {
+            return;
+        }
+
+        if (_isContiguous && _elementOffset == 0 && ElementCount == _buffer.ElementCount)
+        {
+            _buffer.CopyToHost(destination.AsSpan(), stream);
+            return;
+        }
+
+        if (_buffer.DeviceType != GpuDeviceType.NvidiaDiscrete)
+        {
+            throw new NotSupportedException($"Direct host download for sliced or offset views is not supported for device type {_buffer.DeviceType}.");
+        }
+
+        if (!CuDriver.IsAvailable())
+        {
+            throw new PlatformNotSupportedException("NVIDIA CUDA driver is unavailable.");
+        }
+
+        GpuBuffer<T>.EnsureCudaContext();
+
+        IntPtr baseDevPtr = _buffer.DevicePointer;
+        if (baseDevPtr == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Underlying CUDA device pointer is null.");
+        }
+
+        Span<T> dstSpan = destination.AsSpan();
+        if (_isContiguous)
+        {
+            if (_elementOffset < 0 || checked(_elementOffset + ElementCount) > _buffer.ElementCount)
+            {
+                throw new ArgumentOutOfRangeException(nameof(_elementOffset), "Sliced device tensor range exceeds underlying buffer bounds.");
+            }
+
+            nuint byteCount = checked((nuint)ElementCount * (nuint)sizeof(T));
+            fixed (T* pDst = dstSpan)
+            {
+                CopyDeviceToHost((IntPtr)pDst, DevicePointer, byteCount, stream);
+            }
+            return;
+        }
+
+        int rank = _shape.Rank;
+        long innerStride = rank > 0 ? _longStrides[rank - 1] : 1L;
+        int innerLen = rank > 0 ? _shape[rank - 1] : 1;
+        bool innerContiguous = innerStride == 1;
+        int runElements = innerContiguous ? innerLen : 1;
+        nuint runBytes = checked((nuint)runElements * (nuint)sizeof(T));
+        int outerDimCount = innerContiguous ? rank - 1 : rank;
+
+        Span<int> coords = stackalloc int[Math.Max(1, outerDimCount)];
+        coords.Clear();
+
+        long outerIterations = 1;
+        for (int d = 0; d < outerDimCount; d++)
+        {
+            outerIterations = checked(outerIterations * _shape[d]);
+        }
+
+        fixed (T* pDstBase = dstSpan)
+        {
+            long dstIdx = 0;
+            for (long iter = 0; iter < outerIterations; iter++)
+            {
+                long srcElemOffset = _elementOffset;
+                for (int d = 0; d < outerDimCount; d++)
+                {
+                    srcElemOffset = checked(srcElemOffset + (long)coords[d] * _longStrides[d]);
+                }
+
+                if (srcElemOffset < 0 || checked(srcElemOffset + runElements) > _buffer.ElementCount)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(_elementOffset), "Strided device tensor slice exceeds underlying buffer bounds.");
+                }
+
+                IntPtr srcPtr = baseDevPtr + (nint)checked(srcElemOffset * (long)sizeof(T));
+                IntPtr dstPtr = (IntPtr)(pDstBase + dstIdx);
+                CopyDeviceToHost(dstPtr, srcPtr, runBytes, stream);
+                dstIdx += runElements;
+
+                for (int d = outerDimCount - 1; d >= 0; d--)
+                {
+                    coords[d]++;
+                    if (coords[d] < _shape[d])
+                    {
+                        break;
+                    }
+                    coords[d] = 0;
+                }
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CopyDeviceToHost(IntPtr dstHost, IntPtr srcDevice, nuint byteCount, IntPtr stream)
+    {
+        if (stream == IntPtr.Zero)
+        {
+            CuDriver.Check(CuDriver.MemcpyDtoH(dstHost, srcDevice, byteCount), "cuMemcpyDtoH");
+        }
+        else
+        {
+            CuDriver.Check(CuDriver.MemcpyDtoHAsync(dstHost, srcDevice, byteCount, stream), "cuMemcpyDtoHAsync");
+        }
     }
 
     /// <summary>
@@ -238,7 +357,7 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
         if (newShape.ElementCount != ElementCount)
             throw new ArgumentException($"Cannot reshape tensor with {ElementCount} elements to shape with {newShape.ElementCount} elements.");
 
-        return new DeviceResidentTensor<T>(_buffer, _refCount, newShape, Shape8.ComputeContiguousStrides(newShape), _elementOffset, incrementRef: true);
+        return new DeviceResidentTensor<T>(_buffer, _refCount, newShape, Strides8.ComputeContiguous(newShape), _elementOffset, incrementRef: true);
     }
 
     /// <summary>
@@ -256,9 +375,9 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
         _shape.CopyTo(newDims);
         newDims[dimension] = length;
 
-        long newOffset = _elementOffset + (long)start * _strides[dimension];
+        long newOffset = checked(_elementOffset + (long)start * _longStrides[dimension]);
         var newShape = new Shape8(newDims);
-        return new DeviceResidentTensor<T>(_buffer, _refCount, newShape, _strides, newOffset, incrementRef: true);
+        return new DeviceResidentTensor<T>(_buffer, _refCount, newShape, _longStrides, newOffset, incrementRef: true);
     }
 
     /// <summary>
@@ -289,7 +408,20 @@ public sealed unsafe class DeviceResidentTensor<T> : IDisposable where T : unman
         int k = a.Shape[1];
         int n = b.Shape[1];
 
-        destination ??= DeviceResidentTensor<float>.Allocate(m, n);
+        if (destination != null)
+        {
+            ObjectDisposedException.ThrowIf(destination.IsDisposed, destination);
+            if (destination.Rank != 2)
+                throw new ArgumentException("MatMul destination must be a Rank 2 matrix.", nameof(destination));
+            if (destination.Shape[0] != m || destination.Shape[1] != n)
+                throw new ArgumentException($"Destination tensor shape [{destination.Shape[0]}, {destination.Shape[1]}] does not match product dimensions [{m}, {n}].", nameof(destination));
+            if (!destination.IsContiguous)
+                throw new InvalidOperationException("DeviceResidentTensor.MatMul requires a contiguous destination tensor.");
+        }
+        else
+        {
+            destination = DeviceResidentTensor<float>.Allocate(m, n);
+        }
 
         // 1. NVIDIA CUDA fast resident GEMM path
         if (a.DevicePointer != IntPtr.Zero && b.DevicePointer != IntPtr.Zero && destination.DevicePointer != IntPtr.Zero)

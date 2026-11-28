@@ -11,20 +11,59 @@ public static class TensorOps
 {
     public static Tensor<float> MatMul(Tensor<float> a, Tensor<float> b, GpuTarget target = GpuTarget.Auto)
     {
-        if (a.Rank != 2 || b.Rank != 2)
-            throw new ArgumentException("MatMul expects 2D tensors.");
+        ArgumentNullException.ThrowIfNull(a);
+        ArgumentNullException.ThrowIfNull(b);
 
-        int M = a.Shape[0];
-        int N = b.Shape[1];
-        var c = new Tensor<float>(M, N);
-        GpuAccelerator.AcceleratedMatMul(a, b, c, target);
+        if (a.Rank < 2 || b.Rank != 2)
+            throw new ArgumentException("MatMul expects a Rank >= 2 first operand and a 2D second operand.");
 
-        c.RequiresGrad = a.RequiresGrad || b.RequiresGrad;
-        if (c.RequiresGrad)
+        int k = a.Shape[a.Rank - 1];
+        if (k != b.Shape[0])
+            throw new ArgumentException($"Inner dimension mismatch: {k} != {b.Shape[0]}.");
+
+        int n = b.Shape[1];
+        if (a.Rank == 2)
         {
-            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.MatMul, c, a, b));
+            int M = a.Shape[0];
+            var c = new Tensor<float>(M, n);
+            GpuAccelerator.AcceleratedMatMul(a, b, c, target);
+
+            c.RequiresGrad = a.RequiresGrad || b.RequiresGrad;
+            if (c.RequiresGrad)
+            {
+                AutogradTape.Current?.Record(new TapeEntry(AutogradOp.MatMul, c, a, b));
+            }
+            return c;
         }
-        return c;
+
+        // Flatten leading batch dimensions [d0, ..., d_{r-2}, K] -> [M_flat, K]
+        Span<int> outDims = stackalloc int[a.Rank];
+        for (int i = 0; i < a.Rank - 1; i++)
+        {
+            outDims[i] = a.Shape[i];
+        }
+        outDims[a.Rank - 1] = n;
+        var cNd = new Tensor<float>(new Shape8(outDims));
+
+        long mFlatL = k > 0 ? a.ElementCount / k : 0;
+        int mFlat = checked((int)mFlatL);
+        if (mFlat > 0 && n > 0 && k > 0)
+        {
+            using var aContig = a.IsContiguous ? null : a.Contiguous();
+            var aSrc = aContig ?? a;
+            var shape2dA = new Shape8([mFlat, k]);
+            var shape2dC = new Shape8([mFlat, n]);
+            using var a2d = new Tensor<float>(aSrc.MemoryBlock, shape2dA, Strides8.ComputeContiguous(shape2dA), aSrc.ElementOffset, addRef: true);
+            using var c2d = new Tensor<float>(cNd.MemoryBlock, shape2dC, Strides8.ComputeContiguous(shape2dC), cNd.ElementOffset, addRef: true);
+            GpuAccelerator.AcceleratedMatMul(a2d, b, c2d, target);
+        }
+
+        cNd.RequiresGrad = a.RequiresGrad || b.RequiresGrad;
+        if (cNd.RequiresGrad)
+        {
+            AutogradTape.Current?.Record(new TapeEntry(AutogradOp.MatMul, cNd, a, b));
+        }
+        return cNd;
     }
 
     public static Tensor<float> Add(Tensor<float> a, Tensor<float> b)

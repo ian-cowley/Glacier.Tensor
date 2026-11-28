@@ -148,6 +148,7 @@ public class D3D12GemmKernelTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void Execute_HardwareExecutionOrGracefulFallback()
     {
         D3D12GemmKernel.ClearLastError();

@@ -30,7 +30,7 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
             throw new ArgumentOutOfRangeException(nameof(elementCount));
 
         _elementCount = elementCount;
-        _byteLength = (nuint)(elementCount * sizeof(T));
+        _byteLength = checked((nuint)elementCount * (nuint)sizeof(T));
         _ownsMemory = true;
         _lifetimeOwner = null;
         _refCount = 1;
@@ -54,10 +54,12 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
     {
         if (elementCount < 0)
             throw new ArgumentOutOfRangeException(nameof(elementCount));
+        if (externalPointer == null && elementCount > 0)
+            throw new ArgumentNullException(nameof(externalPointer));
 
         _pointer = externalPointer;
         _elementCount = elementCount;
-        _byteLength = (nuint)(elementCount * sizeof(T));
+        _byteLength = checked((nuint)elementCount * (nuint)sizeof(T));
         _ownsMemory = ownsMemory;
         _lifetimeOwner = lifetimeOwner;
         _refCount = 1;
@@ -68,7 +70,7 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
         }
     }
 
-    ~NativeMemoryBlock()
+    private void ReleaseResources()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
@@ -77,7 +79,13 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
                 NativeMemory.AlignedFree(_pointer);
                 _pointer = null;
             }
+            _lifetimeOwner?.Dispose();
         }
+    }
+
+    ~NativeMemoryBlock()
+    {
+        ReleaseResources();
     }
 
     public void AddRef()
@@ -141,14 +149,9 @@ public sealed unsafe class NativeMemoryBlock<T> : IDisposable where T : unmanage
             int next = current - 1;
             if (Interlocked.CompareExchange(ref _refCount, next, current) == current)
             {
-                if (next == 0 && Interlocked.Exchange(ref _disposed, 1) == 0)
+                if (next == 0)
                 {
-                    if (_ownsMemory && _pointer != null)
-                    {
-                        NativeMemory.AlignedFree(_pointer);
-                        _pointer = null;
-                    }
-                    _lifetimeOwner?.Dispose();
+                    ReleaseResources();
                     GC.SuppressFinalize(this);
                 }
                 return;

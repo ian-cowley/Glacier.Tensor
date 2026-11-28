@@ -39,11 +39,11 @@ public readonly struct Shape8 : IEquatable<Shape8>
     {
         get
         {
-            if (_rank == 0) return 0;
+            if (_rank == 0) return 1;
             long count = 1;
             for (int i = 0; i < _rank; i++)
             {
-                count *= _dims[i];
+                count = checked(count * _dims[i]);
             }
             return count;
         }
@@ -78,13 +78,18 @@ public readonly struct Shape8 : IEquatable<Shape8>
         if (rank == 0) return default;
 
         Shape8Buffer strides = default;
+        long currentStride = 1;
         strides[rank - 1] = 1;
         for (int i = rank - 2; i >= 0; i--)
         {
-            strides[i] = strides[i + 1] * shape[i + 1];
+            currentStride = checked(currentStride * shape[i + 1]);
+            strides[i] = checked((int)currentStride);
         }
         return new Shape8(strides, rank);
     }
+
+    public static Strides8 ComputeContiguousStridesLong(in Shape8 shape)
+        => Strides8.ComputeContiguous(in shape);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Shape8 WithDimension(int dimension, int length)
@@ -112,12 +117,26 @@ public readonly struct Shape8 : IEquatable<Shape8>
 
     public bool IsContiguous(in Shape8 strides)
     {
+        if (_rank != strides.Rank) return false;
         if (_rank == 0) return true;
-        int expectedStride = 1;
+        long expectedStride = 1;
         for (int i = _rank - 1; i >= 0; i--)
         {
             if (strides[i] != expectedStride) return false;
-            expectedStride *= _dims[i];
+            expectedStride = checked(expectedStride * _dims[i]);
+        }
+        return true;
+    }
+
+    public bool IsContiguous(in Strides8 strides)
+    {
+        if (_rank != strides.Rank) return false;
+        if (_rank == 0) return true;
+        long expectedStride = 1;
+        for (int i = _rank - 1; i >= 0; i--)
+        {
+            if (strides[i] != expectedStride) return false;
+            expectedStride = checked(expectedStride * _dims[i]);
         }
         return true;
     }

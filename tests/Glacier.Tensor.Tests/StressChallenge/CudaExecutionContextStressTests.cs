@@ -8,6 +8,7 @@ using Xunit;
 
 namespace Glacier.Tensor.Tests.StressChallenge;
 
+[Trait("Hardware", "Gpu")]
 public class CudaExecutionContextStressTests
 {
     [Fact]

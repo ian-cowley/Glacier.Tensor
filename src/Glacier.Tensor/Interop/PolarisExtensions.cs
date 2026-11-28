@@ -55,6 +55,16 @@ public static unsafe class PolarisExtensions
     /// </summary>
     public static Tensor<float> ToTensor(this DataFrame df, params string[] columnNames)
     {
+        return ToTensor(df, nullFillValue: null, columnNames);
+    }
+
+    /// <summary>
+    /// Converts selected numeric columns of a Polaris DataFrame into a 2D Tensor with shape [Rows, Columns].
+    /// Throws <see cref="InvalidOperationException"/> when columns contain nulls and <paramref name="nullFillValue"/> is <c>null</c>;
+    /// otherwise substitutes <paramref name="nullFillValue"/> at null positions.
+    /// </summary>
+    public static Tensor<float> ToTensor(this DataFrame df, float? nullFillValue, params string[] columnNames)
+    {
         if (df == null) throw new ArgumentNullException(nameof(df));
 
         var cols = (columnNames.Length > 0 ? columnNames : df.Columns.Select(c => c.Name)).ToArray();
@@ -67,15 +77,23 @@ public static unsafe class PolarisExtensions
             return tensor;
         }
 
-        // Fast-path: Single column direct memory copy
+        // Fast-path: Single column direct memory copy (only when null-free or filled)
         if (numCols == 1)
         {
             var singleSeries = df.Columns.FirstOrDefault(x => x.Name.Equals(cols[0], StringComparison.OrdinalIgnoreCase))
                 ?? throw new ArgumentException($"Column '{cols[0]}' not found in DataFrame.");
 
-            if (singleSeries is Series<float> sF32)
+            if (singleSeries.ValidityMask.HasNulls)
             {
-                sF32.Memory.Span.CopyTo(tensor.AsSpan());
+                if (!nullFillValue.HasValue)
+                {
+                    throw new InvalidOperationException(
+                        $"Column '{singleSeries.Name}' contains {singleSeries.ValidityMask.NullCount} null value(s) and cannot be converted to Tensor without nullFillValue.");
+                }
+            }
+            else if (singleSeries is Series<float> sF32)
+            {
+                sF32.Memory.Span[..rows].CopyTo(tensor.AsSpan());
                 return tensor;
             }
         }
@@ -83,7 +101,9 @@ public static unsafe class PolarisExtensions
         // Pre-resolve and pin column memory buffers
         var handles = new MemoryHandle[numCols];
         var readers = new ColumnReader[numCols];
+        var masks = new Glacier.Polaris.Memory.ValidityMask?[numCols];
         bool allFloat32 = true;
+        bool anyNulls = false;
 
         try
         {
@@ -92,6 +112,17 @@ public static unsafe class PolarisExtensions
                 string colName = cols[c];
                 var series = df.Columns.FirstOrDefault(x => x.Name.Equals(colName, StringComparison.OrdinalIgnoreCase))
                     ?? throw new ArgumentException($"Column '{colName}' not found in DataFrame.");
+
+                if (series.ValidityMask.HasNulls)
+                {
+                    if (!nullFillValue.HasValue)
+                    {
+                        throw new InvalidOperationException(
+                            $"Column '{series.Name}' contains {series.ValidityMask.NullCount} null value(s) and cannot be converted to Tensor without nullFillValue.");
+                    }
+                    anyNulls = true;
+                    masks[c] = series.ValidityMask;
+                }
 
                 if (series is Series<float> f32)
                 {
@@ -126,7 +157,53 @@ public static unsafe class PolarisExtensions
             const int TileRows = 64;
             const int TileCols = 64;
 
-            if (allFloat32)
+            if (anyNulls)
+            {
+                float fill = nullFillValue!.Value;
+                if (rows >= 2048)
+                {
+                    int totalRowBlocks = (rows + TileRows - 1) / TileRows;
+                    Parallel.For(0, totalRowBlocks, blockIdx =>
+                    {
+                        int rStart = blockIdx * TileRows;
+                        int rEnd = Math.Min(rStart + TileRows, rows);
+                        for (int cStart = 0; cStart < numCols; cStart += TileCols)
+                        {
+                            int cEnd = Math.Min(cStart + TileCols, numCols);
+                            for (int r = rStart; r < rEnd; r++)
+                            {
+                                float* pDestRow = pTensor + (long)r * numCols;
+                                for (int c = cStart; c < cEnd; c++)
+                                {
+                                    var m = masks[c];
+                                    pDestRow[c] = (m != null && m.IsNull(r)) ? fill : readers[c].ReadFloat(r);
+                                }
+                            }
+                        }
+                    });
+                }
+                else
+                {
+                    for (int rStart = 0; rStart < rows; rStart += TileRows)
+                    {
+                        int rEnd = Math.Min(rStart + TileRows, rows);
+                        for (int cStart = 0; cStart < numCols; cStart += TileCols)
+                        {
+                            int cEnd = Math.Min(cStart + TileCols, numCols);
+                            for (int r = rStart; r < rEnd; r++)
+                            {
+                                float* pDestRow = pTensor + (long)r * numCols;
+                                for (int c = cStart; c < cEnd; c++)
+                                {
+                                    var m = masks[c];
+                                    pDestRow[c] = (m != null && m.IsNull(r)) ? fill : readers[c].ReadFloat(r);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else if (allFloat32)
             {
                 // Specialized high-throughput Float32 fast path
                 float*[] colPtrs = new float*[numCols];
@@ -243,7 +320,7 @@ public static unsafe class PolarisExtensions
             throw new ArgumentException("ToSeries requires a 1D tensor.");
 
         using var contig = tensor.Contiguous();
-        int len = (int)contig.ElementCount;
+        int len = checked((int)contig.ElementCount);
         var series = new Float32Series(name, len);
         contig.AsSpan().CopyTo(series.Memory.Span);
         return series;
@@ -283,6 +360,11 @@ public static unsafe class PolarisExtensions
     public static Tensor<T> AsTensorView<T>(this Series<T> series, bool as2DColumn) where T : unmanaged
     {
         if (series == null) throw new ArgumentNullException(nameof(series));
+        if (series.ValidityMask.HasNulls)
+        {
+            throw new InvalidOperationException(
+                $"Series '{series.Name}' contains {series.ValidityMask.NullCount} null value(s) and cannot be exposed as a zero-copy Tensor view.");
+        }
 
         int len = series.Length;
         if (len == 0)
@@ -291,11 +373,27 @@ public static unsafe class PolarisExtensions
         }
 
         var handle = series.Memory.Pin();
-        var owner = new MemoryHandleOwner(handle);
-        var block = new NativeMemoryBlock<T>((T*)handle.Pointer, len, ownsMemory: false, lifetimeOwner: owner);
-        var shape = as2DColumn ? Shape8.Create(len, 1) : Shape8.Create(len);
-        var strides = as2DColumn ? Shape8.Create(1, 1) : Shape8.Create(1);
-        return new Tensor<T>(block, shape, strides, elementOffset: 0);
+        MemoryHandleOwner? owner = null;
+        NativeMemoryBlock<T>? block = null;
+        try
+        {
+            owner = new MemoryHandleOwner(handle);
+            block = new NativeMemoryBlock<T>((T*)handle.Pointer, len, ownsMemory: false, lifetimeOwner: owner);
+            var shape = as2DColumn ? Shape8.Create(len, 1) : Shape8.Create(len);
+            var strides = as2DColumn ? Shape8.Create(1, 1) : Shape8.Create(1);
+            return new Tensor<T>(block, shape, strides, elementOffset: 0);
+        }
+        catch
+        {
+            if (block != null) block.Dispose();
+            else if (owner != null) owner.Dispose();
+            else handle.Dispose();
+            throw;
+        }
+        finally
+        {
+            block?.Dispose();
+        }
     }
 
     /// <summary>

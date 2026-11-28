@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.Intrinsics;
 using Glacier.Tensor.Autograd;
 using Glacier.Tensor.Core;
 
@@ -8,7 +9,7 @@ namespace Glacier.Tensor.Layers;
 /// <summary>
 /// Fully-connected dense linear neural layer: Y = X * W + B.
 /// </summary>
-public sealed class Linear : ILayer
+public sealed unsafe class Linear : ILayer
 {
     private readonly Tensor<float> _weight;
     private readonly Tensor<float> _bias;
@@ -38,33 +39,71 @@ public sealed class Linear : ILayer
     public Tensor<float> Forward(Tensor<float> input)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(input);
 
-        // input: [Batch, inFeatures], weight: [inFeatures, outFeatures] -> [Batch, outFeatures]
+        // input: [..., inFeatures], weight: [inFeatures, outFeatures] -> [..., outFeatures]
         var output = TensorOps.MatMul(input, _weight);
 
-        // Add bias broadcasted across batch rows
-        int batch = input.Shape[0];
         int outFeatures = _weight.Shape[1];
-        var outSpan = output.AsSpan();
-        var biasSpan = _bias.AsSpan();
-
-        for (int b = 0; b < batch; b++)
+        if (outFeatures > 0 && output.ElementCount > 0)
         {
-            for (int f = 0; f < outFeatures; f++)
-            {
-                outSpan[b * outFeatures + f] += biasSpan[f];
-            }
+            int batch = checked((int)(output.ElementCount / outFeatures));
+            using var biasContig = (_bias.IsContiguous && _bias.ElementOffset == 0) ? null : _bias.Contiguous();
+            var biasSrc = biasContig ?? _bias;
+            AddBiasBroadcast(output.DataPointer, biasSrc.DataPointer, batch, outFeatures);
         }
 
+        output.RequiresGrad |= _bias.RequiresGrad;
+
         // Record bias addition on tape if active
-        if (AutogradTape.Current != null)
+        if (AutogradTape.Current != null && _bias.RequiresGrad)
         {
             AutogradTape.Current.Watch(_bias);
-            // Backward pass for bias broadcast: sum across batch dimension
+            // Backward pass for bias broadcast: sum across leading batch dimensions
             AutogradTape.Current.Record(new TapeEntry(AutogradOp.Add, output, null, _bias));
         }
 
         return output;
+    }
+
+    internal static void AddBiasBroadcast(float* outPtr, float* biasPtr, int batch, int outFeatures)
+    {
+        for (int b = 0; b < batch; b++)
+        {
+            float* row = outPtr + (long)b * outFeatures;
+            int f = 0;
+
+            if (Vector512.IsHardwareAccelerated)
+            {
+                int step = Vector512<float>.Count;
+                for (; f + step <= outFeatures; f += step)
+                {
+                    Vector512.Store(Vector512.Load(row + f) + Vector512.Load(biasPtr + f), row + f);
+                }
+            }
+            else if (Vector256.IsHardwareAccelerated)
+            {
+                int step = Vector256<float>.Count;
+                for (; f + step <= outFeatures; f += step)
+                {
+                    Vector256.Store(Vector256.Load(row + f) + Vector256.Load(biasPtr + f), row + f);
+                }
+            }
+
+            if (Vector128.IsHardwareAccelerated)
+            {
+                int step = Vector128<float>.Count;
+                for (; f + step <= outFeatures; f += step)
+                {
+                    Vector128.Store(Vector128.Load(row + f) + Vector128.Load(biasPtr + f), row + f);
+                }
+            }
+
+            for (; f < outFeatures; f++)
+            {
+                row[f] += biasPtr[f];
+            }
+        }
     }
 
     public void ZeroGrad()

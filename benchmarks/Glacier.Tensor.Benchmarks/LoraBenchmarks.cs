@@ -57,9 +57,10 @@ public static class LoraBenchmarks
                 foreach (var p in qLora.Parameters) tape.Watch(p);
 
                 using var pred = qLora.Forward(qInput);
-                var (lossVal, _) = LossFunctions.MSELoss(pred, qTarget);
+                var (lossVal, lossTensor) = LossFunctions.MSELoss(pred, qTarget);
+                using var _loss = lossTensor;
 
-                tape.Backward(pred);
+                tape.Backward(lossTensor);
                 qOpt.Step();
             }
             sw.Stop();
@@ -82,8 +83,9 @@ public static class LoraBenchmarks
                 using var tape = new AutogradTape();
                 foreach (var p in ffnLora.Parameters) tape.Watch(p);
                 using var outT = ffnLora.Forward(ffnInput);
-                var (l, _) = LossFunctions.MSELoss(outT, ffnTarget);
-                tape.Backward(outT);
+                var (l, lTensor) = LossFunctions.MSELoss(outT, ffnTarget);
+                using var _loss = lTensor;
+                tape.Backward(lTensor);
                 ffnOpt.Step();
                 ffnOpt.ZeroGrad();
             }
@@ -97,9 +99,10 @@ public static class LoraBenchmarks
                 foreach (var p in ffnLora.Parameters) tape.Watch(p);
 
                 using var pred = ffnLora.Forward(ffnInput);
-                var (lossVal, _) = LossFunctions.MSELoss(pred, ffnTarget);
+                var (lossVal, lossTensor) = LossFunctions.MSELoss(pred, ffnTarget);
+                using var _loss = lossTensor;
 
-                tape.Backward(pred);
+                tape.Backward(lossTensor);
                 ffnOpt.Step();
             }
             swFfn.Stop();

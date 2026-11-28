@@ -319,12 +319,13 @@ using (var targetOutput = TensorFloatExtensions.RandomUniform([loraBatch, loraDi
         foreach (var p in loraLayer.Parameters) tape.Watch(p);
 
         using var pred = loraLayer.Forward(trainInput);
-        var (lossVal, _) = LossFunctions.MSELoss(pred, targetOutput);
+        var (lossVal, lossTensor) = LossFunctions.MSELoss(pred, targetOutput);
+        using var _loss = lossTensor;
 
         if (step == 1) initialLoss = lossVal;
         finalLoss = lossVal;
 
-        tape.Backward(pred);
+        tape.Backward(lossTensor);
         optimizer.Step();
 
         if (step == 1 || step % 5 == 0)

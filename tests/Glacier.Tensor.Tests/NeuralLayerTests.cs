@@ -66,11 +66,12 @@ public class NeuralLayerTests
             using var outPred = l2.Forward(a1);
 
             var (lossVal, lossTensor) = LossFunctions.MSELoss(outPred, targets);
+            using var _loss = lossTensor;
 
             if (epoch == 0) initialLoss = lossVal;
             finalLoss = lossVal;
 
-            tape.Backward(outPred);
+            tape.Backward(lossTensor);
             optimizer.Step();
         }
 

@@ -30,10 +30,16 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Glacier.Compute" Version="1.1.1" />
-    <PackageReference Include="Glacier.Gpu" Version="1.2.1" />
-    <PackageReference Include="Glacier.Polaris" Version="1.2.6" />
-    <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
-    <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
+    <ProjectReference Include="../../../Glacier.Compute/src/Glacier.Compute/Glacier.Compute.csproj" Condition="Exists('../../../Glacier.Compute/src/Glacier.Compute/Glacier.Compute.csproj') and '$(UseLocalProjectReferences)' != 'false'" />
+    <PackageReference Include="Glacier.Compute" Condition="!Exists('../../../Glacier.Compute/src/Glacier.Compute/Glacier.Compute.csproj') or '$(UseLocalProjectReferences)' == 'false'" />
+
+    <ProjectReference Include="../../../Glacier.Gpu/src/Glacier.Gpu/Glacier.Gpu.csproj" Condition="Exists('../../../Glacier.Gpu/src/Glacier.Gpu/Glacier.Gpu.csproj') and '$(UseLocalProjectReferences)' != 'false'" />
+    <PackageReference Include="Glacier.Gpu" Condition="!Exists('../../../Glacier.Gpu/src/Glacier.Gpu/Glacier.Gpu.csproj') or '$(UseLocalProjectReferences)' == 'false'" />
+
+    <ProjectReference Include="../../../Glacier.Polaris/src/Glacier.Polaris/Glacier.Polaris.csproj" Condition="Exists('../../../Glacier.Polaris/src/Glacier.Polaris/Glacier.Polaris.csproj') and '$(UseLocalProjectReferences)' != 'false'" />
+    <PackageReference Include="Glacier.Polaris" Condition="!Exists('../../../Glacier.Polaris/src/Glacier.Polaris/Glacier.Polaris.csproj') or '$(UseLocalProjectReferences)' == 'false'" />
+
+    <PackageReference Include="Vortice.D3DCompiler" />
+    <PackageReference Include="Vortice.Direct3D12" />
   </ItemGroup>
 </Project>

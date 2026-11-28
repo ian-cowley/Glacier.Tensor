@@ -89,6 +89,7 @@ public sealed class LoraLinear : ILayer
     public Tensor<float> Forward(Tensor<float> input)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(input);
 
         // 1. Base model projection: X * W0 (frozen)
         var baseOut = TensorOps.MatMul(input, _baseWeight);
@@ -109,19 +110,15 @@ public sealed class LoraLinear : ILayer
             baseOut.Dispose();
         }
 
-        // 4. Add base bias if present
-        if (_baseBias != null)
+        // 4. Add base bias if present (supports Rank >= 2 batch flattening)
+        if (_baseBias != null && _outFeatures > 0 && output.ElementCount > 0)
         {
-            int batch = input.Shape[0];
-            var outSpan = output.AsSpan();
-            var biasSpan = _baseBias.AsSpan();
-
-            for (int b = 0; b < batch; b++)
+            int batch = checked((int)(output.ElementCount / _outFeatures));
+            using var biasContig = (_baseBias.IsContiguous && _baseBias.ElementOffset == 0) ? null : _baseBias.Contiguous();
+            var biasSrc = biasContig ?? _baseBias;
+            unsafe
             {
-                for (int f = 0; f < _outFeatures; f++)
-                {
-                    outSpan[b * _outFeatures + f] += biasSpan[f];
-                }
+                Linear.AddBiasBroadcast(output.DataPointer, biasSrc.DataPointer, batch, _outFeatures);
             }
         }
 

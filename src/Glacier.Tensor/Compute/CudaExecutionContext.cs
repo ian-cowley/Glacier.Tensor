@@ -11,6 +11,7 @@ namespace Glacier.Tensor.Compute;
 /// </summary>
 public sealed class CudaExecutionContext : IDisposable
 {
+    private const nuint MaxPooledBufferBytes = 64u * 1024u * 1024u;
     private static readonly ConcurrentQueue<CudaExecutionContext> s_pool = new();
     private static int s_poolCount;
     private static readonly int MaxPoolSize = Math.Max(32, Environment.ProcessorCount * 2);
@@ -23,7 +24,15 @@ public sealed class CudaExecutionContext : IDisposable
     public nuint CapB { get; private set; }
     public nuint CapC { get; private set; }
 
-    private bool _disposed;
+    private int _inPool;
+    private int _disposed;
+
+    public static int PooledCount => Math.Max(0, Volatile.Read(ref s_poolCount));
+
+    static CudaExecutionContext()
+    {
+        AppDomain.CurrentDomain.ProcessExit += static (_, _) => ClearPool();
+    }
 
     private CudaExecutionContext()
     {
@@ -36,14 +45,26 @@ public sealed class CudaExecutionContext : IDisposable
         Stream = stream;
     }
 
+    ~CudaExecutionContext()
+    {
+        try
+        {
+            DisposeCore();
+        }
+        catch
+        {
+        }
+    }
+
     public static CudaExecutionContext Rent()
     {
         GpuAccelerator.BindNvidiaContext();
         while (s_pool.TryDequeue(out var ctx))
         {
             Interlocked.Decrement(ref s_poolCount);
-            if (!ctx._disposed)
+            if (Volatile.Read(ref ctx._disposed) == 0)
             {
+                Interlocked.Exchange(ref ctx._inPool, 0);
                 return ctx;
             }
         }
@@ -53,7 +74,16 @@ public sealed class CudaExecutionContext : IDisposable
 
     public static void Return(CudaExecutionContext? ctx)
     {
-        if (ctx == null || ctx._disposed) return;
+        if (ctx == null || Volatile.Read(ref ctx._disposed) != 0) return;
+
+        // CAS guard prevents double-return pool corruption
+        if (Interlocked.CompareExchange(ref ctx._inPool, 1, 0) != 0)
+        {
+            return;
+        }
+
+        // Release oversized per-stream buffers before returning to pool
+        ctx.ShrinkOversizedBuffers();
 
         if (Interlocked.Increment(ref s_poolCount) <= MaxPoolSize)
         {
@@ -62,23 +92,79 @@ public sealed class CudaExecutionContext : IDisposable
         else
         {
             Interlocked.Decrement(ref s_poolCount);
+            Interlocked.Exchange(ref ctx._inPool, 0);
             ctx.Dispose();
         }
     }
 
+    public static void TrimPool(int maxRetained = 0)
+    {
+        if (maxRetained < 0) maxRetained = 0;
+        while (Volatile.Read(ref s_poolCount) > maxRetained && s_pool.TryDequeue(out var ctx))
+        {
+            Interlocked.Decrement(ref s_poolCount);
+            Interlocked.Exchange(ref ctx._inPool, 0);
+            ctx.Dispose();
+        }
+    }
+
+    public static void ClearPool() => TrimPool(0);
+
+    private void ShrinkOversizedBuffers()
+    {
+        if (CapA <= MaxPooledBufferBytes && CapB <= MaxPooledBufferBytes && CapC <= MaxPooledBufferBytes)
+            return;
+
+        GpuAccelerator.BindNvidiaContext();
+        if (CapA > MaxPooledBufferBytes && DevA != IntPtr.Zero)
+        {
+            CuDriver.MemFree(DevA);
+            DevA = IntPtr.Zero;
+            CapA = 0;
+        }
+        if (CapB > MaxPooledBufferBytes && DevB != IntPtr.Zero)
+        {
+            CuDriver.MemFree(DevB);
+            DevB = IntPtr.Zero;
+            CapB = 0;
+        }
+        if (CapC > MaxPooledBufferBytes && DevC != IntPtr.Zero)
+        {
+            CuDriver.MemFree(DevC);
+            DevC = IntPtr.Zero;
+            CapC = 0;
+        }
+    }
+
+    private static nuint ComputeGrowthBytes(nuint currentCap, nuint requiredBytes)
+    {
+        nuint grown;
+        try
+        {
+            grown = checked(currentCap + currentCap / 2);
+        }
+        catch (OverflowException)
+        {
+            grown = requiredBytes;
+        }
+        return grown > requiredBytes ? grown : requiredBytes;
+    }
+
     public void EnsureCapacityA(nuint requiredBytes)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (requiredBytes > CapA)
         {
             GpuAccelerator.BindNvidiaContext();
-            nuint allocBytes = Math.Max(requiredBytes, (nuint)(CapA * 1.5));
-            if (allocBytes < requiredBytes) allocBytes = requiredBytes;
+            nuint allocBytes = ComputeGrowthBytes(CapA, requiredBytes);
 
             if (DevA != IntPtr.Zero)
             {
-                CuDriver.MemFree(DevA);
+                int freeRes = CuDriver.MemFree(DevA);
                 DevA = IntPtr.Zero;
                 CapA = 0;
+                if (freeRes != 0)
+                    CuDriver.Check(freeRes, "cuMemFree(DevA)");
             }
 
             if (CuDriver.MemAlloc(out IntPtr ptr, allocBytes) != 0)
@@ -96,17 +182,19 @@ public sealed class CudaExecutionContext : IDisposable
 
     public void EnsureCapacityB(nuint requiredBytes)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (requiredBytes > CapB)
         {
             GpuAccelerator.BindNvidiaContext();
-            nuint allocBytes = Math.Max(requiredBytes, (nuint)(CapB * 1.5));
-            if (allocBytes < requiredBytes) allocBytes = requiredBytes;
+            nuint allocBytes = ComputeGrowthBytes(CapB, requiredBytes);
 
             if (DevB != IntPtr.Zero)
             {
-                CuDriver.MemFree(DevB);
+                int freeRes = CuDriver.MemFree(DevB);
                 DevB = IntPtr.Zero;
                 CapB = 0;
+                if (freeRes != 0)
+                    CuDriver.Check(freeRes, "cuMemFree(DevB)");
             }
 
             if (CuDriver.MemAlloc(out IntPtr ptr, allocBytes) != 0)
@@ -124,17 +212,19 @@ public sealed class CudaExecutionContext : IDisposable
 
     public void EnsureCapacityC(nuint requiredBytes)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (requiredBytes > CapC)
         {
             GpuAccelerator.BindNvidiaContext();
-            nuint allocBytes = Math.Max(requiredBytes, (nuint)(CapC * 1.5));
-            if (allocBytes < requiredBytes) allocBytes = requiredBytes;
+            nuint allocBytes = ComputeGrowthBytes(CapC, requiredBytes);
 
             if (DevC != IntPtr.Zero)
             {
-                CuDriver.MemFree(DevC);
+                int freeRes = CuDriver.MemFree(DevC);
                 DevC = IntPtr.Zero;
                 CapC = 0;
+                if (freeRes != 0)
+                    CuDriver.Check(freeRes, "cuMemFree(DevC)");
             }
 
             if (CuDriver.MemAlloc(out IntPtr ptr, allocBytes) != 0)
@@ -150,34 +240,39 @@ public sealed class CudaExecutionContext : IDisposable
         }
     }
 
-    public void Dispose()
+    private void DisposeCore()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
 
         GpuAccelerator.BindNvidiaContext();
         if (DevA != IntPtr.Zero)
         {
-            CuDriver.MemFree(DevA);
+            _ = CuDriver.MemFree(DevA);
             DevA = IntPtr.Zero;
             CapA = 0;
         }
         if (DevB != IntPtr.Zero)
         {
-            CuDriver.MemFree(DevB);
+            _ = CuDriver.MemFree(DevB);
             DevB = IntPtr.Zero;
             CapB = 0;
         }
         if (DevC != IntPtr.Zero)
         {
-            CuDriver.MemFree(DevC);
+            _ = CuDriver.MemFree(DevC);
             DevC = IntPtr.Zero;
             CapC = 0;
         }
         if (Stream != IntPtr.Zero)
         {
-            CuDriver.StreamDestroy(Stream);
+            _ = CuDriver.StreamDestroy(Stream);
             Stream = IntPtr.Zero;
         }
+    }
+
+    public void Dispose()
+    {
+        DisposeCore();
+        GC.SuppressFinalize(this);
     }
 }

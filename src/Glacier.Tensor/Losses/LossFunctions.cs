@@ -1,4 +1,7 @@
 using System;
+using System.Buffers;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 using Glacier.Tensor.Autograd;
 using Glacier.Tensor.Compute;
 using Glacier.Tensor.Core;
@@ -7,43 +10,80 @@ namespace Glacier.Tensor.Losses;
 
 /// <summary>
 /// Differentiable loss functions for deep learning training.
-/// Supports both <c>tape.Backward(lossTensor)</c> and direct <c>tape.Backward(predictions)</c>.
+/// Supports both <c>tape.Backward(lossTensor)</c> and legacy <c>tape.Backward(predictions)</c>.
 /// </summary>
-public static class LossFunctions
+public static unsafe class LossFunctions
 {
     public static (float lossValue, Tensor<float> lossTensor) MSELoss(Tensor<float> predictions, Tensor<float> targets)
     {
+        ArgumentNullException.ThrowIfNull(predictions);
+        ArgumentNullException.ThrowIfNull(targets);
         if (predictions.ElementCount != targets.ElementCount)
             throw new ArgumentException("Prediction and target shapes must match.");
 
-        int n = (int)predictions.ElementCount;
-        using var pContig = predictions.IsContiguous ? null : predictions.Contiguous();
-        using var tContig = targets.IsContiguous ? null : targets.Contiguous();
+        int n = checked((int)predictions.ElementCount);
+        if (n == 0)
+            throw new ArgumentException("Loss requires at least one element.");
+
+        using var pContig = (predictions.IsContiguous && predictions.ElementOffset == 0) ? null : predictions.Contiguous();
+        using var tContig = (targets.IsContiguous && targets.ElementOffset == 0) ? null : targets.Contiguous();
         var pSpan = (pContig ?? predictions).AsSpan();
         var tSpan = (tContig ?? targets).AsSpan();
 
-        float totalLoss = 0f;
-        for (int i = 0; i < n; i++)
+        double totalLoss = 0.0;
+        int i = 0;
+        if (Vector512.IsHardwareAccelerated)
         {
-            float d = pSpan[i] - tSpan[i];
+            var accLo = Vector512<double>.Zero;
+            var accHi = Vector512<double>.Zero;
+            int step = Vector512<float>.Count;
+            fixed (float* pp = pSpan, pt = tSpan)
+            {
+                for (; i + step <= n; i += step)
+                {
+                    var d = Vector512.Load(pp + i) - Vector512.Load(pt + i);
+                    var (lo, hi) = Vector512.Widen(d * d);
+                    accLo += lo;
+                    accHi += hi;
+                }
+            }
+            totalLoss += Vector512.Sum(accLo + accHi);
+        }
+        else if (Vector256.IsHardwareAccelerated)
+        {
+            var accLo = Vector256<double>.Zero;
+            var accHi = Vector256<double>.Zero;
+            int step = Vector256<float>.Count;
+            fixed (float* pp = pSpan, pt = tSpan)
+            {
+                for (; i + step <= n; i += step)
+                {
+                    var d = Vector256.Load(pp + i) - Vector256.Load(pt + i);
+                    var (lo, hi) = Vector256.Widen(d * d);
+                    accLo += lo;
+                    accHi += hi;
+                }
+            }
+            totalLoss += Vector256.Sum(accLo + accHi);
+        }
+
+        for (; i < n; i++)
+        {
+            double d = (double)pSpan[i] - tSpan[i];
             totalLoss += d * d;
         }
-        totalLoss /= n;
 
+        float meanLoss = (float)(totalLoss / n);
         var lossTensor = new Tensor<float>(1);
-        lossTensor.AsSpan()[0] = totalLoss;
+        lossTensor.AsSpan()[0] = meanLoss;
         lossTensor.RequiresGrad = predictions.RequiresGrad;
 
-        if (AutogradTape.Current is { IsExecutingBackward: false } tape)
+        if (AutogradTape.Current is { IsExecutingBackward: false } tape && lossTensor.RequiresGrad)
         {
-            if (predictions.Grad == null)
-                predictions.Grad = Tensor<float>.Zeros(predictions.Shape);
-
-            ComputeMSEGradient(predictions, targets, predictions.Grad, 1.0f, accumulate: true);
             tape.Record(new TapeEntry(AutogradOp.MSELoss, lossTensor, predictions, targets));
         }
 
-        return (totalLoss, lossTensor);
+        return (meanLoss, lossTensor);
     }
 
     internal static void ComputeMSEGradient(
@@ -53,66 +93,96 @@ public static class LossFunctions
         float dLoss,
         bool accumulate = false)
     {
-        int n = (int)predictions.ElementCount;
-        using var pContig = predictions.IsContiguous ? null : predictions.Contiguous();
-        using var tContig = targets.IsContiguous ? null : targets.Contiguous();
-        var pSpan = (pContig ?? predictions).AsSpan();
-        var tSpan = (tContig ?? targets).AsSpan();
-        var gSpan = gradOutput.AsSpan();
+        int n = checked((int)predictions.ElementCount);
+        using var pContig = (predictions.IsContiguous && predictions.ElementOffset == 0) ? null : predictions.Contiguous();
+        using var tContig = (targets.IsContiguous && targets.ElementOffset == 0) ? null : targets.Contiguous();
+        using var gContig = (gradOutput.IsContiguous && gradOutput.ElementOffset == 0)
+            ? null
+            : (accumulate ? gradOutput.Contiguous() : new Tensor<float>(gradOutput.Shape));
+
+        var pSrc = pContig ?? predictions;
+        var tSrc = tContig ?? targets;
+        var gDst = gContig ?? gradOutput;
+
+        float* pp = pSrc.DataPointer;
+        float* pt = tSrc.DataPointer;
+        float* pg = gDst.DataPointer;
 
         float scale = (2.0f * dLoss) / n;
-        if (accumulate)
+        int i = 0;
+
+        if (Vector512.IsHardwareAccelerated)
         {
-            for (int i = 0; i < n; i++)
+            var vScale = Vector512.Create(scale);
+            int step = Vector512<float>.Count;
+            for (; i + step <= n; i += step)
             {
-                gSpan[i] += scale * (pSpan[i] - tSpan[i]);
+                var grad = vScale * (Vector512.Load(pp + i) - Vector512.Load(pt + i));
+                if (accumulate) grad += Vector512.Load(pg + i);
+                Vector512.Store(grad, pg + i);
             }
         }
-        else
+        else if (Vector256.IsHardwareAccelerated)
         {
-            for (int i = 0; i < n; i++)
+            var vScale = Vector256.Create(scale);
+            int step = Vector256<float>.Count;
+            for (; i + step <= n; i += step)
             {
-                gSpan[i] = scale * (pSpan[i] - tSpan[i]);
+                var grad = vScale * (Vector256.Load(pp + i) - Vector256.Load(pt + i));
+                if (accumulate) grad += Vector256.Load(pg + i);
+                Vector256.Store(grad, pg + i);
             }
+        }
+
+        for (; i < n; i++)
+        {
+            float grad = scale * (pp[i] - pt[i]);
+            pg[i] = accumulate ? pg[i] + grad : grad;
+        }
+
+        if (gContig != null)
+        {
+            Tensor<float>.CopyElements(gContig, gradOutput);
         }
     }
 
     public static (float lossValue, Tensor<float> lossTensor) BinaryCrossEntropy(Tensor<float> predictions, Tensor<float> targets)
     {
+        ArgumentNullException.ThrowIfNull(predictions);
+        ArgumentNullException.ThrowIfNull(targets);
         if (predictions.ElementCount != targets.ElementCount)
             throw new ArgumentException("Prediction and target shapes must match.");
 
-        int n = (int)predictions.ElementCount;
-        using var pContig = predictions.IsContiguous ? null : predictions.Contiguous();
-        using var tContig = targets.IsContiguous ? null : targets.Contiguous();
+        int n = checked((int)predictions.ElementCount);
+        if (n == 0)
+            throw new ArgumentException("Loss requires at least one element.");
+
+        using var pContig = (predictions.IsContiguous && predictions.ElementOffset == 0) ? null : predictions.Contiguous();
+        using var tContig = (targets.IsContiguous && targets.ElementOffset == 0) ? null : targets.Contiguous();
         var pSpan = (pContig ?? predictions).AsSpan();
         var tSpan = (tContig ?? targets).AsSpan();
 
-        float totalLoss = 0f;
+        double totalLoss = 0.0;
         const float eps = 1e-7f;
 
         for (int i = 0; i < n; i++)
         {
             float p = Math.Clamp(pSpan[i], eps, 1.0f - eps);
             float y = tSpan[i];
-            totalLoss -= y * MathF.Log(p) + (1.0f - y) * MathF.Log(1.0f - p);
+            totalLoss -= (double)y * MathF.Log(p) + (1.0 - y) * MathF.Log(1.0f - p);
         }
-        totalLoss /= n;
 
+        float meanLoss = (float)(totalLoss / n);
         var lossTensor = new Tensor<float>(1);
-        lossTensor.AsSpan()[0] = totalLoss;
+        lossTensor.AsSpan()[0] = meanLoss;
         lossTensor.RequiresGrad = predictions.RequiresGrad;
 
-        if (AutogradTape.Current is { IsExecutingBackward: false } tape)
+        if (AutogradTape.Current is { IsExecutingBackward: false } tape && lossTensor.RequiresGrad)
         {
-            if (predictions.Grad == null)
-                predictions.Grad = Tensor<float>.Zeros(predictions.Shape);
-
-            ComputeBinaryCrossEntropyGradient(predictions, targets, predictions.Grad, 1.0f, accumulate: true);
             tape.Record(new TapeEntry(AutogradOp.BinaryCrossEntropyLoss, lossTensor, predictions, targets));
         }
 
-        return (totalLoss, lossTensor);
+        return (meanLoss, lossTensor);
     }
 
     internal static void ComputeBinaryCrossEntropyGradient(
@@ -123,12 +193,16 @@ public static class LossFunctions
         bool accumulate = false)
     {
         const float eps = 1e-7f;
-        int n = (int)predictions.ElementCount;
-        using var pContig = predictions.IsContiguous ? null : predictions.Contiguous();
-        using var tContig = targets.IsContiguous ? null : targets.Contiguous();
+        int n = checked((int)predictions.ElementCount);
+        using var pContig = (predictions.IsContiguous && predictions.ElementOffset == 0) ? null : predictions.Contiguous();
+        using var tContig = (targets.IsContiguous && targets.ElementOffset == 0) ? null : targets.Contiguous();
+        using var gContig = (gradOutput.IsContiguous && gradOutput.ElementOffset == 0)
+            ? null
+            : (accumulate ? gradOutput.Contiguous() : new Tensor<float>(gradOutput.Shape));
+
         var pSpan = (pContig ?? predictions).AsSpan();
         var tSpan = (tContig ?? targets).AsSpan();
-        var gSpan = gradOutput.AsSpan();
+        var gSpan = (gContig ?? gradOutput).AsSpan();
 
         float scale = dLoss / n;
         if (accumulate)
@@ -149,25 +223,26 @@ public static class LossFunctions
                 gSpan[i] = scale * (p - y) / (p * (1.0f - p));
             }
         }
+
+        if (gContig != null)
+        {
+            Tensor<float>.CopyElements(gContig, gradOutput);
+        }
     }
 
-    private static double Log1p(double x)
-    {
-        if (x == 0.0) return 0.0;
-        double u = 1.0 + x;
-        if (u == 1.0) return x;
-        return Math.Log(u) * (x / (u - 1.0));
-    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static double Log1p(double x) => FusedCrossEntropyLoss.Log1p(x);
 
     private static void ComputeSplitSumSoftmaxStats(
-        ReadOnlySpan<float> rowLogits,
+        float* rowLogits,
+        int classes,
         out double maxLogit,
         out int argMax,
         out double sumOther)
     {
         argMax = 0;
         maxLogit = rowLogits[0];
-        for (int c = 1; c < rowLogits.Length; c++)
+        for (int c = 1; c < classes; c++)
         {
             float v = rowLogits[c];
             if (v > maxLogit)
@@ -178,46 +253,62 @@ public static class LossFunctions
         }
 
         sumOther = 0.0;
-        for (int c = 0; c < rowLogits.Length; c++)
+        for (int c = 0; c < classes; c++)
         {
             if (c != argMax)
+            {
                 sumOther += Math.Exp((double)rowLogits[c] - maxLogit);
+            }
         }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ResolveBatchClasses(Tensor<float> logits, out int batch, out int classes)
+    {
+        ArgumentNullException.ThrowIfNull(logits);
+        if (logits.Rank == 0)
+            throw new ArgumentException("Logits tensor must have Rank >= 1.");
+
+        classes = logits.Rank > 1 ? logits.Shape[logits.Rank - 1] : logits.Shape[0];
+        batch = classes > 0 ? checked((int)(logits.ElementCount / classes)) : 0;
+
+        if (batch <= 0 || classes <= 0)
+            throw new ArgumentException("Invalid logits tensor dimensions.");
     }
 
     /// <summary>
     /// Computes multi-class categorical cross-entropy loss with fused numerical-stable softmax.
-    /// Supports one-hot targets of shape [B, C] or class index targets of shape [B] or [B, 1].
+    /// Supports Rank >= 1 logits (<c>[..., C]</c>) with one-hot targets or class index targets.
     /// Automatically records on AutogradTape for reverse-mode automatic differentiation.
     /// </summary>
     public static (float lossValue, Tensor<float> lossTensor) CrossEntropy(Tensor<float> logits, Tensor<float> targets)
     {
-        int batch = logits.Shape.Rank > 1 ? logits.Shape[0] : 1;
-        int classes = logits.Shape.Rank > 1 ? logits.Shape[1] : logits.Shape[0];
+        ArgumentNullException.ThrowIfNull(targets);
+        ResolveBatchClasses(logits, out int batch, out int classes);
 
-        if (batch <= 0 || classes <= 0)
-            throw new ArgumentException("Invalid logits tensor dimensions.");
+        using var lContig = (logits.IsContiguous && logits.ElementOffset == 0) ? null : logits.Contiguous();
+        using var tContig = (targets.IsContiguous && targets.ElementOffset == 0) ? null : targets.Contiguous();
+        var lSrc = lContig ?? logits;
+        var tSrc = tContig ?? targets;
 
-        using var lContig = logits.IsContiguous ? null : logits.Contiguous();
-        using var tContig = targets.IsContiguous ? null : targets.Contiguous();
-        var logSpan = (lContig ?? logits).AsSpan();
-        var tgtSpan = (tContig ?? targets).AsSpan();
+        float* pLog = lSrc.DataPointer;
+        float* pTgt = tSrc.DataPointer;
         bool isOneHot = targets.ElementCount == (long)batch * classes;
 
         double totalLoss = 0.0;
 
         for (int b = 0; b < batch; b++)
         {
-            int offset = b * classes;
-            ReadOnlySpan<float> rowLogits = logSpan.Slice(offset, classes);
-            ComputeSplitSumSoftmaxStats(rowLogits, out double maxLogit, out int argMax, out double sumOther);
+            long offset = (long)b * classes;
+            float* rowLogits = pLog + offset;
+            ComputeSplitSumSoftmaxStats(rowLogits, classes, out double maxLogit, out int argMax, out double sumOther);
             double logZOffset = Log1p(sumOther);
 
             if (isOneHot)
             {
                 for (int c = 0; c < classes; c++)
                 {
-                    double y = tgtSpan[offset + c];
+                    double y = pTgt[offset + c];
                     if (y > 0.0)
                     {
                         double negLogP = (c == argMax)
@@ -229,7 +320,7 @@ public static class LossFunctions
             }
             else
             {
-                int targetClass = (int)tgtSpan[b];
+                int targetClass = (int)pTgt[b];
                 if (targetClass >= 0 && targetClass < classes)
                 {
                     double negLogP = (targetClass == argMax)
@@ -246,12 +337,8 @@ public static class LossFunctions
         lossTensor.AsSpan()[0] = meanLoss;
         lossTensor.RequiresGrad = logits.RequiresGrad;
 
-        if (AutogradTape.Current is { IsExecutingBackward: false } tape)
+        if (AutogradTape.Current is { IsExecutingBackward: false } tape && lossTensor.RequiresGrad)
         {
-            if (logits.Grad == null)
-                logits.Grad = Tensor<float>.Zeros(logits.Shape);
-
-            ComputeCrossEntropyGradient(logits, targets, logits.Grad, 1.0f);
             tape.Record(new TapeEntry(AutogradOp.CrossEntropyLoss, lossTensor, logits, targets));
         }
 
@@ -264,34 +351,44 @@ public static class LossFunctions
         Tensor<float> gradOutput,
         float dLoss)
     {
-        int batch = logits.Shape.Rank > 1 ? logits.Shape[0] : 1;
-        int classes = logits.Shape.Rank > 1 ? logits.Shape[1] : logits.Shape[0];
+        ResolveBatchClasses(logits, out int batch, out int classes);
 
-        using var lContig = logits.IsContiguous ? null : logits.Contiguous();
-        using var tContig = targets.IsContiguous ? null : targets.Contiguous();
-        var logSpan = (lContig ?? logits).AsSpan();
-        var tgtSpan = (tContig ?? targets).AsSpan();
-        var outSpan = gradOutput.AsSpan();
+        using var lContig = (logits.IsContiguous && logits.ElementOffset == 0) ? null : logits.Contiguous();
+        using var tContig = (targets.IsContiguous && targets.ElementOffset == 0) ? null : targets.Contiguous();
+        using var gContig = (gradOutput.IsContiguous && gradOutput.ElementOffset == 0) ? null : new Tensor<float>(gradOutput.Shape);
+
+        var lSrc = lContig ?? logits;
+        var tSrc = tContig ?? targets;
+        var gDst = gContig ?? gradOutput;
+
+        float* pLog = lSrc.DataPointer;
+        float* pTgt = tSrc.DataPointer;
+        float* pOut = gDst.DataPointer;
         bool isOneHot = targets.ElementCount == (long)batch * classes;
         double dScale = (double)dLoss / batch;
 
         for (int b = 0; b < batch; b++)
         {
-            int offset = b * classes;
-            ReadOnlySpan<float> rowLogits = logSpan.Slice(offset, classes);
-            ComputeSplitSumSoftmaxStats(rowLogits, out double maxLogit, out int argMax, out double sumOther);
+            long offset = (long)b * classes;
+            float* rowLogits = pLog + offset;
+            ComputeSplitSumSoftmaxStats(rowLogits, classes, out double maxLogit, out int argMax, out double sumOther);
             double invDenom = 1.0 / (1.0 + sumOther);
 
-            int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
+            int targetClass = isOneHot ? -1 : (int)pTgt[b];
 
             for (int c = 0; c < classes; c++)
             {
-                double y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0 : 0.0);
+                double y = isOneHot ? pTgt[offset + c] : (targetClass == c ? 1.0 : 0.0);
                 double diff = (c == argMax)
                     ? (((1.0 - y) - y * sumOther) * invDenom)
                     : (Math.Exp((double)rowLogits[c] - maxLogit) * invDenom - y);
-                outSpan[offset + c] = (float)(dScale * diff);
+                pOut[offset + c] = (float)(dScale * diff);
             }
+        }
+
+        if (gContig != null)
+        {
+            Tensor<float>.CopyElements(gContig, gradOutput);
         }
     }
 
@@ -304,16 +401,16 @@ public static class LossFunctions
         Tensor<float> targets,
         float labelSmoothing = 0.0f)
     {
-        int batch = logits.Shape.Rank > 1 ? logits.Shape[0] : 1;
-        int classes = logits.Shape.Rank > 1 ? logits.Shape[1] : logits.Shape[0];
+        ArgumentNullException.ThrowIfNull(targets);
+        ResolveBatchClasses(logits, out int batch, out int classes);
 
-        if (batch <= 0 || classes <= 0)
-            throw new ArgumentException("Invalid logits tensor dimensions.");
+        using var lContig = (logits.IsContiguous && logits.ElementOffset == 0) ? null : logits.Contiguous();
+        using var tContig = (targets.IsContiguous && targets.ElementOffset == 0) ? null : targets.Contiguous();
+        var lSrc = lContig ?? logits;
+        var tSrc = tContig ?? targets;
 
-        using var lContig = logits.IsContiguous ? null : logits.Contiguous();
-        using var tContig = targets.IsContiguous ? null : targets.Contiguous();
-        var logSpan = (lContig ?? logits).AsSpan();
-        var tgtSpan = (tContig ?? targets).AsSpan();
+        float* pLog = lSrc.DataPointer;
+        float* pTgt = tSrc.DataPointer;
         bool isOneHot = targets.ElementCount == (long)batch * classes;
         double totalLoss = 0.0;
         double smoothing = labelSmoothing;
@@ -321,15 +418,15 @@ public static class LossFunctions
 
         for (int b = 0; b < batch; b++)
         {
-            int offset = b * classes;
-            ReadOnlySpan<float> rowLogits = logSpan.Slice(offset, classes);
-            ComputeSplitSumSoftmaxStats(rowLogits, out double maxLogit, out int argMax, out double sumOther);
+            long offset = (long)b * classes;
+            float* rowLogits = pLog + offset;
+            ComputeSplitSumSoftmaxStats(rowLogits, classes, out double maxLogit, out int argMax, out double sumOther);
             double logZOffset = Log1p(sumOther);
 
-            int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
+            int targetClass = isOneHot ? -1 : (int)pTgt[b];
             for (int c = 0; c < classes; c++)
             {
-                double y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0 : 0.0);
+                double y = isOneHot ? pTgt[offset + c] : (targetClass == c ? 1.0 : 0.0);
                 double smoothedY = (1.0 - smoothing) * y + smoothVal;
                 double negLogP = (c == argMax)
                     ? logZOffset
@@ -343,12 +440,8 @@ public static class LossFunctions
         lossTensor.AsSpan()[0] = meanLoss;
         lossTensor.RequiresGrad = logits.RequiresGrad;
 
-        if (AutogradTape.Current is { IsExecutingBackward: false } tape)
+        if (AutogradTape.Current is { IsExecutingBackward: false } tape && lossTensor.RequiresGrad)
         {
-            if (logits.Grad == null)
-                logits.Grad = Tensor<float>.Zeros(logits.Shape);
-
-            ComputeCategoricalCrossEntropyGradient(logits, targets, logits.Grad, labelSmoothing, 1.0f, accumulate: true);
             tape.Record(new TapeEntry(AutogradOp.CategoricalCrossEntropyLoss, lossTensor, logits, targets, labelSmoothing));
         }
 
@@ -363,14 +456,21 @@ public static class LossFunctions
         float dLoss,
         bool accumulate = false)
     {
-        int batch = logits.Shape.Rank > 1 ? logits.Shape[0] : 1;
-        int classes = logits.Shape.Rank > 1 ? logits.Shape[1] : logits.Shape[0];
+        ResolveBatchClasses(logits, out int batch, out int classes);
 
-        using var lContig = logits.IsContiguous ? null : logits.Contiguous();
-        using var tContig = targets.IsContiguous ? null : targets.Contiguous();
-        var logSpan = (lContig ?? logits).AsSpan();
-        var tgtSpan = (tContig ?? targets).AsSpan();
-        var outSpan = gradOutput.AsSpan();
+        using var lContig = (logits.IsContiguous && logits.ElementOffset == 0) ? null : logits.Contiguous();
+        using var tContig = (targets.IsContiguous && targets.ElementOffset == 0) ? null : targets.Contiguous();
+        using var gContig = (gradOutput.IsContiguous && gradOutput.ElementOffset == 0)
+            ? null
+            : (accumulate ? gradOutput.Contiguous() : new Tensor<float>(gradOutput.Shape));
+
+        var lSrc = lContig ?? logits;
+        var tSrc = tContig ?? targets;
+        var gDst = gContig ?? gradOutput;
+
+        float* pLog = lSrc.DataPointer;
+        float* pTgt = tSrc.DataPointer;
+        float* pOut = gDst.DataPointer;
         bool isOneHot = targets.ElementCount == (long)batch * classes;
         double smoothing = labelSmoothing;
         double smoothVal = smoothing / classes;
@@ -378,25 +478,30 @@ public static class LossFunctions
 
         for (int b = 0; b < batch; b++)
         {
-            int offset = b * classes;
-            ReadOnlySpan<float> rowLogits = logSpan.Slice(offset, classes);
-            ComputeSplitSumSoftmaxStats(rowLogits, out double maxLogit, out int argMax, out double sumOther);
+            long offset = (long)b * classes;
+            float* rowLogits = pLog + offset;
+            ComputeSplitSumSoftmaxStats(rowLogits, classes, out double maxLogit, out int argMax, out double sumOther);
             double invDenom = 1.0 / (1.0 + sumOther);
 
-            int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
+            int targetClass = isOneHot ? -1 : (int)pTgt[b];
             for (int c = 0; c < classes; c++)
             {
-                double y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0 : 0.0);
+                double y = isOneHot ? pTgt[offset + c] : (targetClass == c ? 1.0 : 0.0);
                 double smoothedY = (1.0 - smoothing) * y + smoothVal;
                 double diff = (c == argMax)
                     ? (((1.0 - smoothedY) - smoothedY * sumOther) * invDenom)
                     : (Math.Exp((double)rowLogits[c] - maxLogit) * invDenom - smoothedY);
                 float grad = (float)(dScale * diff);
                 if (accumulate)
-                    outSpan[offset + c] += grad;
+                    pOut[offset + c] += grad;
                 else
-                    outSpan[offset + c] = grad;
+                    pOut[offset + c] = grad;
             }
+        }
+
+        if (gContig != null)
+        {
+            Tensor<float>.CopyElements(gContig, gradOutput);
         }
     }
 
@@ -408,67 +513,73 @@ public static class LossFunctions
         Tensor<float> logits,
         Tensor<float> targets)
     {
-        int batch = logits.Shape.Rank > 1 ? logits.Shape[0] : 1;
-        int classes = logits.Shape.Rank > 1 ? logits.Shape[1] : logits.Shape[0];
+        ArgumentNullException.ThrowIfNull(targets);
+        ResolveBatchClasses(logits, out int batch, out int classes);
 
-        if (batch <= 0 || classes <= 0)
-            throw new ArgumentException("Invalid logits tensor dimensions.");
+        using var lContig = (logits.IsContiguous && logits.ElementOffset == 0) ? null : logits.Contiguous();
+        using var tContig = (targets.IsContiguous && targets.ElementOffset == 0) ? null : targets.Contiguous();
+        var lSrc = lContig ?? logits;
+        var tSrc = tContig ?? targets;
 
-        using var lContig = logits.IsContiguous ? null : logits.Contiguous();
-        using var tContig = targets.IsContiguous ? null : targets.Contiguous();
-        var logSpan = (lContig ?? logits).AsSpan();
-        var tgtSpan = (tContig ?? targets).AsSpan();
+        float* pLog = lSrc.DataPointer;
+        float* pTgt = tSrc.DataPointer;
         bool isOneHot = targets.ElementCount == (long)batch * classes;
-        float totalLoss = 0f;
+        double totalLoss = 0.0;
 
-        Span<float> probs = stackalloc float[Math.Min(classes, 256)];
-        bool useHeap = classes > 256;
-        float[]? heapArr = useHeap ? new float[classes] : null;
-        Span<float> pSpan = useHeap ? heapArr.AsSpan() : probs;
-
-        for (int b = 0; b < batch; b++)
+        float[]? rented = classes > 256 ? ArrayPool<float>.Shared.Rent(classes) : null;
+        try
         {
-            int offset = b * classes;
+            Span<float> pSpan = rented != null ? rented.AsSpan(0, classes) : stackalloc float[classes];
 
-            float maxLogit = logSpan[offset];
-            for (int c = 1; c < classes; c++)
+            for (int b = 0; b < batch; b++)
             {
-                if (logSpan[offset + c] > maxLogit) maxLogit = logSpan[offset + c];
+                long offset = (long)b * classes;
+                float* rowLogits = pLog + offset;
+
+                float maxLogit = rowLogits[0];
+                for (int c = 1; c < classes; c++)
+                {
+                    if (rowLogits[c] > maxLogit) maxLogit = rowLogits[c];
+                }
+
+                double sumExp = 0.0;
+                for (int c = 0; c < classes; c++)
+                {
+                    float e = SimdMath.FastExpNonPositiveScalar(rowLogits[c] - maxLogit);
+                    pSpan[c] = e;
+                    sumExp += e;
+                }
+
+                float invSum = (float)(1.0 / sumExp);
+                int targetClass = isOneHot ? -1 : (int)pTgt[b];
+                for (int c = 0; c < classes; c++)
+                {
+                    pSpan[c] *= invSum;
+                    float y = isOneHot ? pTgt[offset + c] : (targetClass == c ? 1.0f : 0.0f);
+                    double diff = (double)pSpan[c] - y;
+                    totalLoss += diff * diff;
+                }
             }
-
-            float sumExp = 0f;
-            for (int c = 0; c < classes; c++)
+        }
+        finally
+        {
+            if (rented != null)
             {
-                pSpan[c] = MathF.Exp(logSpan[offset + c] - maxLogit);
-                sumExp += pSpan[c];
-            }
-
-            float invSum = 1.0f / sumExp;
-            int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
-            for (int c = 0; c < classes; c++)
-            {
-                pSpan[c] *= invSum;
-                float y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0f : 0.0f);
-                float diff = pSpan[c] - y;
-                totalLoss += diff * diff;
+                ArrayPool<float>.Shared.Return(rented);
             }
         }
 
-        totalLoss /= batch;
+        float meanLoss = (float)(totalLoss / batch);
         var lossTensor = new Tensor<float>(1);
-        lossTensor.AsSpan()[0] = totalLoss;
+        lossTensor.AsSpan()[0] = meanLoss;
         lossTensor.RequiresGrad = logits.RequiresGrad;
 
-        if (AutogradTape.Current is { IsExecutingBackward: false } tape)
+        if (AutogradTape.Current is { IsExecutingBackward: false } tape && lossTensor.RequiresGrad)
         {
-            if (logits.Grad == null)
-                logits.Grad = Tensor<float>.Zeros(logits.Shape);
-
-            ComputeBrierScoreGradient(logits, targets, logits.Grad, 1.0f, accumulate: true);
             tape.Record(new TapeEntry(AutogradOp.BrierScoreLoss, lossTensor, logits, targets));
         }
 
-        return (totalLoss, lossTensor);
+        return (meanLoss, lossTensor);
     }
 
     internal static void ComputeBrierScoreGradient(
@@ -478,59 +589,82 @@ public static class LossFunctions
         float dLoss,
         bool accumulate = false)
     {
-        int batch = logits.Shape.Rank > 1 ? logits.Shape[0] : 1;
-        int classes = logits.Shape.Rank > 1 ? logits.Shape[1] : logits.Shape[0];
+        ResolveBatchClasses(logits, out int batch, out int classes);
 
-        using var lContig = logits.IsContiguous ? null : logits.Contiguous();
-        using var tContig = targets.IsContiguous ? null : targets.Contiguous();
-        var logSpan = (lContig ?? logits).AsSpan();
-        var tgtSpan = (tContig ?? targets).AsSpan();
-        var outSpan = gradOutput.AsSpan();
+        using var lContig = (logits.IsContiguous && logits.ElementOffset == 0) ? null : logits.Contiguous();
+        using var tContig = (targets.IsContiguous && targets.ElementOffset == 0) ? null : targets.Contiguous();
+        using var gContig = (gradOutput.IsContiguous && gradOutput.ElementOffset == 0)
+            ? null
+            : (accumulate ? gradOutput.Contiguous() : new Tensor<float>(gradOutput.Shape));
+
+        var lSrc = lContig ?? logits;
+        var tSrc = tContig ?? targets;
+        var gDst = gContig ?? gradOutput;
+
+        float* pLog = lSrc.DataPointer;
+        float* pTgt = tSrc.DataPointer;
+        float* pOut = gDst.DataPointer;
         bool isOneHot = targets.ElementCount == (long)batch * classes;
         float scale = (2.0f * dLoss) / batch;
 
-        Span<float> probs = stackalloc float[Math.Min(classes, 256)];
-        bool useHeap = classes > 256;
-        float[]? heapArr = useHeap ? new float[classes] : null;
-        Span<float> pSpan = useHeap ? heapArr.AsSpan() : probs;
-
-        for (int b = 0; b < batch; b++)
+        float[]? rented = classes > 256 ? ArrayPool<float>.Shared.Rent(classes) : null;
+        try
         {
-            int offset = b * classes;
+            Span<float> pSpan = rented != null ? rented.AsSpan(0, classes) : stackalloc float[classes];
 
-            float maxLogit = logSpan[offset];
-            for (int c = 1; c < classes; c++)
+            for (int b = 0; b < batch; b++)
             {
-                if (logSpan[offset + c] > maxLogit) maxLogit = logSpan[offset + c];
-            }
+                long offset = (long)b * classes;
+                float* rowLogits = pLog + offset;
 
-            float sumExp = 0f;
-            for (int c = 0; c < classes; c++)
+                float maxLogit = rowLogits[0];
+                for (int c = 1; c < classes; c++)
+                {
+                    if (rowLogits[c] > maxLogit) maxLogit = rowLogits[c];
+                }
+
+                double sumExp = 0.0;
+                for (int c = 0; c < classes; c++)
+                {
+                    float e = SimdMath.FastExpNonPositiveScalar(rowLogits[c] - maxLogit);
+                    pSpan[c] = e;
+                    sumExp += e;
+                }
+
+                float invSum = (float)(1.0 / sumExp);
+                int targetClass = isOneHot ? -1 : (int)pTgt[b];
+                double dotDiffProb = 0.0;
+
+                for (int c = 0; c < classes; c++)
+                {
+                    pSpan[c] *= invSum;
+                    float y = isOneHot ? pTgt[offset + c] : (targetClass == c ? 1.0f : 0.0f);
+                    dotDiffProb += ((double)pSpan[c] - y) * pSpan[c];
+                }
+
+                float dotF = (float)dotDiffProb;
+                for (int c = 0; c < classes; c++)
+                {
+                    float y = isOneHot ? pTgt[offset + c] : (targetClass == c ? 1.0f : 0.0f);
+                    float grad = scale * pSpan[c] * ((pSpan[c] - y) - dotF);
+                    if (accumulate)
+                        pOut[offset + c] += grad;
+                    else
+                        pOut[offset + c] = grad;
+                }
+            }
+        }
+        finally
+        {
+            if (rented != null)
             {
-                pSpan[c] = MathF.Exp(logSpan[offset + c] - maxLogit);
-                sumExp += pSpan[c];
+                ArrayPool<float>.Shared.Return(rented);
             }
+        }
 
-            float invSum = 1.0f / sumExp;
-            int targetClass = isOneHot ? -1 : (int)tgtSpan[b];
-            float dotDiffProb = 0f;
-
-            for (int c = 0; c < classes; c++)
-            {
-                pSpan[c] *= invSum;
-                float y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0f : 0.0f);
-                dotDiffProb += (pSpan[c] - y) * pSpan[c];
-            }
-
-            for (int c = 0; c < classes; c++)
-            {
-                float y = isOneHot ? tgtSpan[offset + c] : (targetClass == c ? 1.0f : 0.0f);
-                float grad = scale * pSpan[c] * ((pSpan[c] - y) - dotDiffProb);
-                if (accumulate)
-                    outSpan[offset + c] += grad;
-                else
-                    outSpan[offset + c] = grad;
-            }
+        if (gContig != null)
+        {
+            Tensor<float>.CopyElements(gContig, gradOutput);
         }
     }
 
