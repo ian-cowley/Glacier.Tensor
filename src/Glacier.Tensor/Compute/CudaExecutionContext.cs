@@ -51,8 +51,9 @@ public sealed class CudaExecutionContext : IDisposable
         {
             DisposeCore();
         }
-        catch
+        catch (Exception ex)
         {
+            _ = ex;
         }
     }
 

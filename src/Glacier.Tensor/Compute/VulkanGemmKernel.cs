@@ -186,7 +186,11 @@ void main() {
 
             try
             {
-                try { _context.Synchronize(); } catch { }
+                try { _context.Synchronize(); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Trace.TraceWarning($"[VulkanGemmKernel] Synchronize during cleanup warning: {ex.Message}");
+                }
                 var dev = _context.DeviceHandle;
                 if (dev != IntPtr.Zero)
                 {
@@ -202,8 +206,9 @@ void main() {
 
                 _context.Dispose();
             }
-            catch
+            catch (Exception ex)
             {
+                System.Diagnostics.Trace.TraceWarning($"[VulkanGemmKernel] Cleanup warning: {ex.Message}");
             }
             finally
             {

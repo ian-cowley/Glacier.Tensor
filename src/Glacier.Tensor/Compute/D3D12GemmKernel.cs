@@ -298,9 +298,17 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                     File.WriteAllBytes(tmpPath, result);
                     File.Move(tmpPath, cachePath, overwrite: true);
                 }
-                catch
+                catch (Exception cleanupEx) when (cleanupEx is IOException or UnauthorizedAccessException)
                 {
-                    try { File.Delete(tmpPath); } catch { }
+                    try
+                    {
+                        if (File.Exists(tmpPath)) File.Delete(tmpPath);
+                    }
+                    catch (Exception deleteEx) when (deleteEx is IOException or UnauthorizedAccessException)
+                    {
+                        System.Diagnostics.Trace.TraceWarning($"[D3D12GemmKernel] Failed to delete temp shader cache '{tmpPath}': {deleteEx.Message}");
+                    }
+                    System.Diagnostics.Trace.TraceWarning($"[D3D12GemmKernel] Failed to persist shader cache '{cachePath}': {cleanupEx.Message}");
                 }
             }
 
@@ -413,14 +421,22 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
                     WaitForFenceValue(_fenceValue);
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                System.Diagnostics.Trace.TraceWarning($"[D3D12GemmKernel] WaitForFenceValue during cleanup warning: {ex.Message}");
             }
 
-            static void SafeDispose(ref ID3D12Resource? res)
+            static void SafeDispose<T>(ref T? res) where T : class, IDisposable
             {
-                try { res?.Dispose(); } catch { }
-                res = null;
+                if (res is not null)
+                {
+                    try { res.Dispose(); }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Trace.TraceWarning($"[D3D12GemmKernel] Dispose warning for {typeof(T).Name}: {ex.Message}");
+                    }
+                    res = null;
+                }
             }
 
             SafeDispose(ref _readbackC);
@@ -433,33 +449,23 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
             _capB = 0;
             _capC = 0;
 
-            try { _pipelineState?.Dispose(); } catch { }
-            _pipelineState = null;
-            try { _rootSig?.Dispose(); } catch { }
-            _rootSig = null;
+            SafeDispose(ref _pipelineState);
+            SafeDispose(ref _rootSig);
 
             for (int i = 0; i < _slots.Length; i++)
             {
-                try { _slots[i].CommandList?.Dispose(); } catch { }
-                _slots[i].CommandList = null;
-                try { _slots[i].Allocator?.Dispose(); } catch { }
-                _slots[i].Allocator = null;
+                SafeDispose(ref _slots[i].CommandList);
+                SafeDispose(ref _slots[i].Allocator);
                 _slots[i].FenceValue = 0;
             }
 
-            try { _fence?.Dispose(); } catch { }
-            _fence = null;
+            SafeDispose(ref _fence);
             _fenceValue = 0;
-            try { _fenceEvent?.Dispose(); } catch { }
-            _fenceEvent = null;
-            try { _queue?.Dispose(); } catch { }
-            _queue = null;
-            try { _device?.Dispose(); } catch { }
-            _device = null;
-            try { _adapter?.Dispose(); } catch { }
-            _adapter = null;
-            try { _factory?.Dispose(); } catch { }
-            _factory = null;
+            SafeDispose(ref _fenceEvent);
+            SafeDispose(ref _queue);
+            SafeDispose(ref _device);
+            SafeDispose(ref _adapter);
+            SafeDispose(ref _factory);
         }
 
         public bool EnsureInitialized()
@@ -623,7 +629,14 @@ void main(uint3 gId : SV_GroupID, uint3 tId : SV_GroupThreadID)
             }
             catch (Exception ex)
             {
-                try { chosenAdapter?.Dispose(); } catch { }
+                if (chosenAdapter is not null)
+                {
+                    try { chosenAdapter.Dispose(); }
+                    catch (Exception disposeEx)
+                    {
+                        System.Diagnostics.Trace.TraceWarning($"[D3D12GemmKernel] Adapter dispose warning: {disposeEx.Message}");
+                    }
+                }
                 CleanupHandlesLocked();
                 _available = false;
                 RecordError(D3D12ExecutionStage.Initialization, ex);

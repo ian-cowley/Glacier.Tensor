@@ -54,7 +54,10 @@ public static unsafe partial class GpuAccelerator
                 return GpuEngineFactory.CreateOptimalEngine();
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Trace.TraceWarning($"[GpuAccelerator] GPU engine initialization failed, falling back: {ex.Message}");
+        }
         return null;
     });
 
@@ -78,8 +81,9 @@ public static unsafe partial class GpuAccelerator
                 {
                     s_gpuEngine.Value?.Dispose();
                 }
-                catch
+                catch (Exception ex)
                 {
+                    _ = ex;
                 }
             }
         };

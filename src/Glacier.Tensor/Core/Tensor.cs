@@ -115,8 +115,9 @@ public sealed unsafe class Tensor<T> : IDisposable where T : unmanaged
         {
             FreeDeviceMemory();
         }
-        catch
+        catch (Exception ex)
         {
+            _ = ex;
         }
     }
 

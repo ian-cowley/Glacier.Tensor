@@ -180,7 +180,11 @@ internal static unsafe class CublasDriver
             }
             else if (handle != IntPtr.Zero && s_cublasDestroy != null)
             {
-                try { s_cublasDestroy(handle); } catch { }
+                try { s_cublasDestroy(handle); }
+                catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or InvalidOperationException or System.Runtime.InteropServices.ExternalException)
+                {
+                    System.Diagnostics.Trace.TraceWarning($"[CublasDriver] cublasDestroy warning: {ex.Message}");
+                }
             }
         }
     }
@@ -192,7 +196,11 @@ internal static unsafe class CublasDriver
         {
             if (handle != IntPtr.Zero)
             {
-                try { s_cublasDestroy(handle); } catch { }
+                try { s_cublasDestroy(handle); }
+                catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or InvalidOperationException or System.Runtime.InteropServices.ExternalException)
+                {
+                    System.Diagnostics.Trace.TraceWarning($"[CublasDriver] ClearHandles cublasDestroy warning: {ex.Message}");
+                }
             }
         }
     }
